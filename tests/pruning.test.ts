@@ -22,6 +22,7 @@ function config(overrides: Partial<PruningStrategyConfig> = {}): PruningStrategy
   return {
     automaticInManualMode: false,
     protectedFilePatterns: [],
+    turnProtection: { enabled: false, turns: 4 },
     deduplication: { enabled: true, protectedTools: [] },
     purgeErrors: { enabled: true, turns: 2, protectedTools: [] },
     ...overrides,
@@ -60,6 +61,21 @@ describe("tool pruning", () => {
     expect(applySelectedToolPruning(groups, state)).toBe(1);
     expect(first.content).toEqual([{ type: "text", text: PRUNED_TOOL_OUTPUT }]);
     expect(latest.content).toEqual([{ type: "text", text: "new output" }]);
+  });
+
+  test("protects tool calls in recent user turns", () => {
+    const { state } = prepare([
+      userMessage("one", 1),
+      assistantMessage([toolCall("old", "read", { path: "src/a.ts" })], 2),
+      toolResult("old", "old", 3),
+      userMessage("two", 4),
+      assistantMessage([toolCall("new", "read", { path: "src/a.ts" })], 5),
+      toolResult("new", "new", 6),
+    ]);
+    const protectedConfig = config({ turnProtection: { enabled: true, turns: 2 } });
+    expect(selectDuplicateTools(state, protectedConfig)).toEqual([]);
+    state.currentTurn = 4;
+    expect(selectDuplicateTools(state, protectedConfig).map((record) => record.toolCallId)).toEqual(["old"]);
   });
 
   test("preserves ask answers and skips edit and write deduplication", () => {

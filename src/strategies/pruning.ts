@@ -13,6 +13,7 @@ export interface PurgeErrorStrategy extends StrategyToggle {
 export interface PruningStrategyConfig {
   automaticInManualMode: boolean;
   protectedFilePatterns: string[];
+  turnProtection: { enabled: boolean; turns: number };
   deduplication: StrategyToggle;
   purgeErrors: PurgeErrorStrategy;
 }
@@ -53,6 +54,12 @@ function prunedRecord(record: ToolCallRecord, reason: PrunedToolRecord["reason"]
   };
 }
 
+function isTurnProtected(state: RuntimeState, record: ToolCallRecord, config: PruningStrategyConfig): boolean {
+  return config.turnProtection.enabled
+    && config.turnProtection.turns > 0
+    && state.currentTurn - record.turn < config.turnProtection.turns;
+}
+
 export function selectDuplicateTools(
   state: RuntimeState,
   config: PruningStrategyConfig,
@@ -65,6 +72,7 @@ export function selectDuplicateTools(
   const ordered = [...state.toolCalls.values()].sort((left, right) => left.order - right.order);
   for (const record of ordered) {
     if (record.nativePruned || state.prunedTools.has(record.toolCallId)) continue;
+    if (isTurnProtected(state, record, config)) continue;
     if (record.toolName === "edit" || record.toolName === "write") continue;
     if (isToolRecordProtected(record, config.deduplication.protectedTools, config.protectedFilePatterns)) continue;
     const signature = createToolSignature(record.toolName, record.input);
@@ -95,6 +103,7 @@ export function selectOldErrorTools(
 
   for (const record of state.toolCalls.values()) {
     if (!record.isError || record.nativePruned || state.prunedTools.has(record.toolCallId)) continue;
+    if (isTurnProtected(state, record, config)) continue;
     if (state.currentTurn - record.turn < threshold) continue;
     if (isToolRecordProtected(record, config.purgeErrors.protectedTools, config.protectedFilePatterns)) continue;
     selected.push(prunedRecord(record, "purge-error", now));

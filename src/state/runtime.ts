@@ -137,12 +137,17 @@ export function applyMutation(state: RuntimeState, mutation: PersistedMutation):
       state.nudges.iterationAnchors = new Set(mutation.iteration);
       break;
     case "native-compaction-reset":
-      for (const blockId of mutation.blockIds) {
-        const block = state.blocks.get(blockId);
-        if (!block) continue;
-        block.active = false;
-        state.activeBlockIds.delete(blockId);
-      }
+      state.references = createMessageReferenceState();
+      state.toolCalls.clear();
+      state.prunedTools.clear();
+      state.blocks.clear();
+      state.activeBlockIds.clear();
+      state.nudges.contextLimitAnchors.clear();
+      state.nudges.turnAnchors.clear();
+      state.nudges.iterationAnchors.clear();
+      state.currentTurn = 0;
+      state.nextBlockId = 1;
+      state.nextRunId = 1;
       break;
   }
 }
