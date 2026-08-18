@@ -56,6 +56,7 @@ interface RuntimeController {
   requestSequence: number;
   mutationTail: Promise<void>;
   manualCompressionGrants: number;
+  reportedPromptWarnings: Set<string>;
 }
 
 function isDcpNotification(message: AgentMessage): boolean {
@@ -170,6 +171,24 @@ function notify(
     },
     { deliverAs: "nextTurn" },
   );
+}
+
+function reloadPrompts(
+  pi: ExtensionAPI,
+  controller: RuntimeController,
+  context: ExtensionContext | ExtensionCommandContext,
+  reportRepeatedWarnings = false,
+): string[] {
+  controller.prompts.reload();
+  const warnings = [...controller.prompts.warnings];
+  const currentWarnings = new Set(warnings);
+  for (const warning of warnings) {
+    if (!reportRepeatedWarnings && controller.reportedPromptWarnings.has(warning)) continue;
+    context.ui.notify(`DCP: ${warning}`, "warning");
+    pi.logger.warn("DCP prompt warning", { warning });
+  }
+  controller.reportedPromptWarnings = currentWarnings;
+  return warnings;
 }
 
 function statusText(state: RuntimeState, usage?: { tokens: number; contextWindow: number }): string {
@@ -629,12 +648,15 @@ async function openPanel(
     const active = listCompressionTargets(state, true).length;
     const title = `${statusText(state, context.getContextUsage())} · ${active} active block${active === 1 ? "" : "s"}`;
     const toggle = state.manualMode ? "Disable manual mode" : "Enable manual mode";
+    const reloadOption = controller.config.experimental.customPrompts
+      ? "Reload prompt overrides"
+      : "Prompt overrides disabled";
     const selected = await context.ui.select(title, [
       toggle,
       "Decompress block",
       "Recompress block",
       "Sweep tool outputs",
-      "Reload prompt overrides",
+      reloadOption,
       "Close",
     ]);
     if (!selected || selected === "Close") return;
@@ -646,9 +668,18 @@ async function openPanel(
     if (selected === "Decompress block") await runDecompressCommand(pi, controller, "", context);
     else if (selected === "Recompress block") await runRecompressCommand(pi, controller, "", context);
     else if (selected === "Sweep tool outputs") runSweepCommand(pi, controller, "", context);
-    else if (selected === "Reload prompt overrides") {
-      controller.prompts.reload();
-      context.ui.notify("DCP prompt overrides reloaded.", "info");
+    else if (selected === reloadOption) {
+      if (!controller.config.experimental.customPrompts) {
+        context.ui.notify("DCP custom prompt overrides are disabled. Set experimental.customPrompts to true.", "warning");
+        continue;
+      }
+      const warnings = reloadPrompts(pi, controller, context, true);
+      context.ui.notify(
+        warnings.length === 0
+          ? "DCP prompt overrides reloaded."
+          : `DCP prompt overrides reloaded with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}.`,
+        warnings.length === 0 ? "info" : "warning",
+      );
     }
   }
 }
@@ -715,6 +746,7 @@ export function registerDynamicContextPruning(
     requestSequence: 0,
     mutationTail: Promise.resolve(),
     manualCompressionGrants: 0,
+    reportedPromptWarnings: new Set(),
   };
   pi.setLabel("Dynamic Context Pruning");
   if (!controller.config.enabled) return;
@@ -735,10 +767,15 @@ export function registerDynamicContextPruning(
       }
     }
     context.ui.setStatus(STATUS_KEY, subagentDisabled ? undefined : statusText(controller.state, context.getContextUsage()));
-    for (const warning of [...loaded.warnings, ...controller.prompts.warnings]) {
+    for (const warning of loaded.warnings) {
       context.ui.notify(`DCP: ${warning}`, "warning");
       pi.logger.warn("DCP configuration warning", { warning });
     }
+    for (const warning of controller.prompts.warnings) {
+      context.ui.notify(`DCP: ${warning}`, "warning");
+      pi.logger.warn("DCP prompt warning", { warning });
+    }
+    controller.reportedPromptWarnings = new Set(controller.prompts.warnings);
   };
 
   pi.on("session_start", restore);
@@ -749,7 +786,7 @@ export function registerDynamicContextPruning(
   pi.on("before_agent_start", async (event, context) => {
     if (isSubagent(context) && !controller.config.experimental.allowSubAgents) return;
     if (controller.config.compress.permission === "deny") return;
-    controller.prompts.reload();
+    reloadPrompts(pi, controller, context);
     const additions = [controller.prompts.get("system")];
     if (controller.state.manualMode) additions.push(MANUAL_MODE_PROMPT);
     if (isSubagent(context)) additions.push(SUBAGENT_PROMPT);
@@ -761,7 +798,7 @@ export function registerDynamicContextPruning(
   pi.on("context", async (event, context) => {
     if (isSubagent(context) && !controller.config.experimental.allowSubAgents) return;
     controller.requestSequence += 1;
-    controller.prompts.reload();
+    reloadPrompts(pi, controller, context);
     const messages = structuredClone(event.messages)
       .filter((message) => !isDcpNotification(message));
     stripDcpMetadata(messages);

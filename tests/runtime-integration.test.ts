@@ -26,7 +26,8 @@ describe("OMP runtime integration", () => {
     mkdirSync(agentDir, { recursive: true });
     writeFileSync(join(agentDir, "dcp.jsonc"), `{
       "pruneNotification": "off",
-      "compress": { "permission": "ask", "nudgeForce": "strong", "minContextLimit": 0, "maxContextLimit": 999999 }
+      "compress": { "permission": "ask", "nudgeForce": "strong", "minContextLimit": 0, "maxContextLimit": 999999 },
+      "experimental": { "customPrompts": true }
     }`);
     const extensionModule = join(root, "test-extension.ts");
     const source = resolve("src/extension.ts");
@@ -96,6 +97,33 @@ describe("OMP runtime integration", () => {
     expect(JSON.stringify(prompted)).toContain("context-constrained environment");
     await sessionStart?.({ type: "session_start", reason: "startup" }, context);
 
+    const overrides = join(agentDir, "dcp-prompts", "overrides");
+    const invalidOverride = join(overrides, "turn-nudge.md");
+    mkdirSync(overrides, { recursive: true });
+    writeFileSync(invalidOverride, "<!-- empty -->");
+    await systemPrompt?.(
+      { type: "before_agent_start", prompt: "Investigate", systemPrompt: ["Base prompt"] },
+      context,
+    );
+    const promptWarningCount = () => notifications.filter((message) => message.includes("turn-nudge.md")).length;
+    expect(promptWarningCount()).toBe(1);
+    await systemPrompt?.(
+      { type: "before_agent_start", prompt: "Investigate", systemPrompt: ["Base prompt"] },
+      context,
+    );
+    expect(promptWarningCount()).toBe(1);
+    writeFileSync(invalidOverride, "<dcp-system-reminder>Valid replacement</dcp-system-reminder>");
+    await systemPrompt?.(
+      { type: "before_agent_start", prompt: "Investigate", systemPrompt: ["Base prompt"] },
+      context,
+    );
+    writeFileSync(invalidOverride, "<!-- empty -->");
+    await systemPrompt?.(
+      { type: "before_agent_start", prompt: "Investigate", systemPrompt: ["Base prompt"] },
+      context,
+    );
+    expect(promptWarningCount()).toBe(2);
+
     const transform = extension?.handlers.get("context")?.[0];
     expect(transform).toBeDefined();
     const turnNudge = await transform?.({ type: "context", messages: [rawMessages[0]] }, context);
@@ -158,9 +186,14 @@ describe("OMP runtime integration", () => {
       throw new Error("Context handler returned no messages.");
     }
 
-    selections.push("Enable manual mode");
+    selections.push("Reload prompt overrides");
     const panelCommand = extension?.commands.get("dcp");
     if (!panelCommand) throw new Error("DCP panel command was not registered.");
+    await Reflect.apply(panelCommand.handler, panelCommand, ["", context]);
+    expect(promptWarningCount()).toBe(3);
+    expect(notifications.at(-1)).toContain("reloaded with 1 warning");
+
+    selections.push("Enable manual mode");
     await Reflect.apply(panelCommand.handler, panelCommand, ["", context]);
     const manualCall = () => Reflect.apply(compress.execute, compress, [
       "manual-compress-call",
@@ -241,6 +274,19 @@ describe("OMP runtime integration", () => {
     expect(loaded.errors).toEqual([]);
     expect(loaded.extensions[0]?.tools.has("compress")).toBe(false);
     expect(loaded.extensions[0]?.commands.has("dcp-compress")).toBe(false);
+    const disabledPanel = loaded.extensions[0]?.commands.get("dcp");
+    if (!disabledPanel) throw new Error("DCP panel command was not registered.");
+    const disabledSelections = ["Prompt overrides disabled"];
+    const disabledNotifications: string[] = [];
+    await Reflect.apply(disabledPanel.handler, disabledPanel, ["", {
+      hasUI: true,
+      getContextUsage: () => undefined,
+      ui: {
+        notify: (message: string) => disabledNotifications.push(message),
+        select: async () => disabledSelections.shift(),
+      },
+    }]);
+    expect(disabledNotifications.at(-1)).toContain("custom prompt overrides are disabled");
     const beforeAgent = loaded.extensions[0]?.handlers.get("before_agent_start")?.[0];
     const result = await beforeAgent?.(
       { type: "before_agent_start", prompt: "Work", systemPrompt: ["Base"] },
