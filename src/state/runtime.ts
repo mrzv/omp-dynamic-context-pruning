@@ -31,8 +31,18 @@ function addCompressionBlock(state: RuntimeState, block: CompressionBlock): void
   if (block.active) state.activeBlockIds.add(block.blockId);
   state.nextBlockId = Math.max(state.nextBlockId, block.blockId + 1);
   state.nextRunId = Math.max(state.nextRunId, block.runId + 1);
-  state.stats.totalPruneTokens += Math.max(0, block.compressedTokens - block.summaryTokens);
-  state.stats.totalMessagesCompressed += block.memberKeys.length;
+  state.stats.totalPruneTokens += block.compressedTokens;
+  state.stats.totalMessagesCompressed += block.directMemberKeys.length;
+}
+
+function coveredKeys(state: RuntimeState, activeBlockIds: ReadonlySet<number>): Set<string> {
+  const keys = new Set<string>();
+  for (const blockId of activeBlockIds) {
+    const block = state.blocks.get(blockId);
+    if (!block) continue;
+    for (const key of block.memberKeys) keys.add(key);
+  }
+  return keys;
 }
 
 export function applyMutation(state: RuntimeState, mutation: PersistedMutation): void {
@@ -61,21 +71,63 @@ export function applyMutation(state: RuntimeState, mutation: PersistedMutation):
         state.stats.totalToolsPruned += 1;
       }
       break;
-    case "compression-created":
+    case "compression-created": {
+      const incomingIds = new Set<number>();
       for (const block of mutation.blocks) {
-        if (!state.blocks.has(block.blockId)) addCompressionBlock(state, block);
+        if (
+          !block.active
+          || block.deactivatedByUser
+          || incomingIds.has(block.blockId)
+          || state.blocks.has(block.blockId)
+          || block.consumedBlockIds.some((blockId) => !state.blocks.has(blockId))
+        ) return;
+        incomingIds.add(block.blockId);
+      }
+      for (const block of mutation.blocks) addCompressionBlock(state, block);
+      for (const block of mutation.blocks) {
+        for (const consumedBlockId of block.consumedBlockIds) {
+          const consumed = state.blocks.get(consumedBlockId);
+          if (!consumed) return;
+          consumed.active = false;
+          state.activeBlockIds.delete(consumedBlockId);
+        }
       }
       break;
-    case "blocks-activation":
-      for (const blockId of mutation.blockIds) {
-        const block = state.blocks.get(blockId);
-        if (!block) continue;
-        block.active = mutation.active;
-        block.deactivatedByUser = mutation.byUser && !mutation.active;
-        if (mutation.active) state.activeBlockIds.add(blockId);
-        else state.activeBlockIds.delete(blockId);
+    }
+    case "blocks-activation": {
+      const changedIds = new Set<number>();
+      for (const change of mutation.changes) {
+        if (changedIds.has(change.blockId) || !state.blocks.has(change.blockId)) return;
+        changedIds.add(change.blockId);
       }
+      const beforeActive = new Set(state.activeBlockIds);
+      const afterActive = new Set(beforeActive);
+      for (const change of mutation.changes) {
+        if (change.active) afterActive.add(change.blockId);
+        else afterActive.delete(change.blockId);
+      }
+      const beforeCovered = coveredKeys(state, beforeActive);
+      const afterCovered = coveredKeys(state, afterActive);
+      let tokenDelta = 0;
+      for (const change of mutation.changes) {
+        const block = state.blocks.get(change.blockId);
+        if (!block || block.active === change.active) continue;
+        if (change.active && block.directMemberKeys.some((key) => !beforeCovered.has(key))) {
+          tokenDelta += block.compressedTokens;
+        } else if (!change.active && block.directMemberKeys.some((key) => !afterCovered.has(key))) {
+          tokenDelta -= block.compressedTokens;
+        }
+      }
+      for (const change of mutation.changes) {
+        const block = state.blocks.get(change.blockId);
+        if (!block) return;
+        block.active = change.active;
+        block.deactivatedByUser = change.deactivatedByUser;
+      }
+      state.activeBlockIds = afterActive;
+      state.stats.totalPruneTokens = Math.max(0, state.stats.totalPruneTokens + tokenDelta);
       break;
+    }
     case "manual-mode":
       state.manualMode = mutation.enabled;
       break;

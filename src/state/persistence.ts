@@ -62,14 +62,15 @@ function isCompressionBlocks(value: unknown): boolean {
     && isPositiveInteger(item.blockId)
     && isPositiveInteger(item.runId)
     && (item.mode === "range" || item.mode === "message")
-    && typeof item.active === "boolean"
-    && typeof item.deactivatedByUser === "boolean"
+    && item.active === true
+    && item.deactivatedByUser === false
     && typeof item.topic === "string"
     && (item.batchTopic === undefined || typeof item.batchTopic === "string")
     && typeof item.startRef === "string"
     && typeof item.endRef === "string"
     && typeof item.anchorKey === "string"
     && isStringArray(item.memberKeys)
+    && isStringArray(item.directMemberKeys)
     && isStringArray(item.toolCallIds)
     && isPositiveIntegerArray(item.includedBlockIds)
     && isPositiveIntegerArray(item.consumedBlockIds)
@@ -78,6 +79,15 @@ function isCompressionBlocks(value: unknown): boolean {
     && isNonNegativeFinite(item.summaryTokens)
     && isNonNegativeFinite(item.durationMs)
     && isNonNegativeFinite(item.createdAt)
+  ));
+}
+
+function isActivationChanges(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => (
+    isUnknownRecord(item)
+    && isPositiveInteger(item.blockId)
+    && typeof item.active === "boolean"
+    && typeof item.deactivatedByUser === "boolean"
   ));
 }
 
@@ -93,9 +103,7 @@ export function isPersistedMutation(value: unknown): value is PersistedMutation 
     case "compression-created":
       return isCompressionBlocks(value.blocks);
     case "blocks-activation":
-      return isPositiveIntegerArray(value.blockIds)
-        && typeof value.active === "boolean"
-        && typeof value.byUser === "boolean";
+      return isActivationChanges(value.changes);
     case "manual-mode":
       return typeof value.enabled === "boolean";
     case "nudge-anchors":

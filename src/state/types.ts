@@ -35,6 +35,7 @@ export interface CompressionBlock {
   endRef: string;
   anchorKey: string;
   memberKeys: string[];
+  directMemberKeys: string[];
   toolCallIds: string[];
   includedBlockIds: number[];
   consumedBlockIds: number[];
@@ -77,6 +78,12 @@ export interface ReferenceAssignment {
   ref: string;
 }
 
+export interface BlockActivationChange {
+  blockId: number;
+  active: boolean;
+  deactivatedByUser: boolean;
+}
+
 interface MutationBase {
   version: 1;
   at: number;
@@ -86,7 +93,7 @@ export type PersistedMutation =
   | (MutationBase & { kind: "references-assigned"; assignments: ReferenceAssignment[]; nextRef: number })
   | (MutationBase & { kind: "tools-pruned"; records: PrunedToolRecord[] })
   | (MutationBase & { kind: "compression-created"; blocks: CompressionBlock[] })
-  | (MutationBase & { kind: "blocks-activation"; blockIds: number[]; active: boolean; byUser: boolean })
+  | (MutationBase & { kind: "blocks-activation"; changes: BlockActivationChange[] })
   | (MutationBase & { kind: "manual-mode"; enabled: boolean })
   | (MutationBase & {
       kind: "nudge-anchors";
