@@ -1,0 +1,8 @@
+OMP Dynamic Context Pruning
+
+This program is a modified port of Dynamic Context Pruning Plugin by the OpenCode DCP contributors:
+https://github.com/Opencode-DCP/opencode-dynamic-context-pruning
+
+The port was created for Oh My Pi and first modified on 2026-08-17. It adapts the original prompts, configuration concepts, compression algorithms, protected-content rules, and context-pruning strategies to OMP's extension and message APIs. It is not the original OpenCode plugin.
+
+The upstream baseline used for this port is @tarquinen/opencode-dcp 3.1.15. Both the upstream work and this modified version are licensed under GNU AGPL-3.0-or-later. See LICENSE.
