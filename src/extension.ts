@@ -271,6 +271,27 @@ function reloadPrompts(
   return warnings;
 }
 
+function formatCompactTokenCount(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens <= 0) return "0";
+  const units = ["", "k", "m", "b", "t"] as const;
+  let value = Math.round(tokens);
+  let unitIndex = 0;
+  while (value >= 1_000 && unitIndex < units.length - 1) {
+    value /= 1_000;
+    unitIndex += 1;
+  }
+  const precision = value < 100 ? 10 : 1;
+  const rounded = Math.round(value * precision) / precision;
+  if (rounded >= 1_000 && unitIndex < units.length - 1) {
+    return `1${units[unitIndex + 1]}`;
+  }
+  return `${rounded}${units[unitIndex]}`;
+}
+
+function compactStatusText(state: RuntimeState): string {
+  return `DCP −${formatCompactTokenCount(state.stats.totalPruneTokens)}`;
+}
+
 function statusText(state: RuntimeState, usage?: { tokens: number; contextWindow: number }): string {
   const saved = Math.round(state.stats.totalPruneTokens).toLocaleString();
   if (!usage) return `DCP −${saved}`;
@@ -600,7 +621,7 @@ function normalizeMessageArgs(value: unknown): CompressMessageArgs {
         }
         const text = compressionResultText(blocks, issues);
         if (controller.config.compress.showCompression) notify(pi, context, controller.config, text);
-        context.ui.setStatus(STATUS_KEY, statusText(controller.state, context.getContextUsage()));
+        context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
         return { content: [{ type: "text" as const, text }], details: { blocks, issues } };
       });
     },
@@ -864,7 +885,7 @@ export function registerDynamicContextPruning(
         await pi.setActiveTools(next);
       }
     }
-    context.ui.setStatus(STATUS_KEY, subagentDisabled ? undefined : statusText(controller.state, context.getContextUsage()));
+    context.ui.setStatus(STATUS_KEY, subagentDisabled ? undefined : compactStatusText(controller.state));
     for (const warning of loaded.warnings) {
       context.ui.notify(`DCP: ${warning}`, "warning");
       pi.logger.warn("DCP configuration warning", { warning });
@@ -980,7 +1001,7 @@ export function registerDynamicContextPruning(
     phaseStartedAt = performance.now();
     appendNudge(pi, controller, context, transformed, groups);
     assertValidToolPairing(transformed);
-    context.ui.setStatus(STATUS_KEY, statusText(controller.state, context.getContextUsage()));
+    context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
     phases.finalization = performance.now() - phaseStartedAt;
 
     const totalMs = performance.now() - startedAt;
@@ -1028,7 +1049,7 @@ export function registerDynamicContextPruning(
       controller.messageAssociations.reset();
       resetPendingPruneNotification(controller);
       controller.toolRecords.clear();
-      context.ui.setStatus(STATUS_KEY, statusText(controller.state, context.getContextUsage()));
+      context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
     });
   });
 

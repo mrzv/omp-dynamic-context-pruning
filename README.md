@@ -225,6 +225,8 @@ Set `experimental.allowSubAgents` to `true` to enable DCP in task subagents. The
 
 ## Notifications and state
 
+OMP currently renders extension status contributions on a separate footer row. DCP keeps its contribution compact—for example, `DCP −278k` or `DCP −3m`—and leaves context percentage reporting to OMP's built-in status line.
+
 `pruneNotification` controls the detail level. `pruneNotificationType` selects chat messages or TUI notifications. Automatic tool-pruning notices are aggregated across the agent run and emitted once when the run finishes; manual command feedback remains immediate.
 
 DCP removes its chat notifications from model input. The messages remain visible to the user.

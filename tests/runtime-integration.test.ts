@@ -66,6 +66,17 @@ describe("OMP runtime integration", () => {
     const branch = [
       { type: "message", id: "entry-user", message: rawMessages[0] },
       { type: "message", id: "entry-assistant", message: rawMessages[1] },
+      {
+        type: "custom",
+        id: "status-prune-k",
+        customType: "dev.ohmypi.dcp.state.v1",
+        data: {
+          version: 1,
+          at: 1,
+          kind: "tools-pruned",
+          records: [{ toolCallId: "status-k", reason: "sweep", tokenCount: 278_400, prunedAt: 1 }],
+        },
+      },
     ];
     const context = {
       cwd: root,
@@ -96,6 +107,22 @@ describe("OMP runtime integration", () => {
     );
     expect(JSON.stringify(prompted)).toContain("context-constrained environment");
     await sessionStart?.({ type: "session_start", reason: "startup" }, context);
+    expect(statuses.at(-1)).toBe("DCP −278k");
+    expect(statuses.at(-1)).not.toContain("%");
+    branch.push({
+      type: "custom",
+      id: "status-prune-m",
+      customType: "dev.ohmypi.dcp.state.v1",
+      data: {
+        version: 1,
+        at: 2,
+        kind: "tools-pruned",
+        records: [{ toolCallId: "status-m", reason: "sweep", tokenCount: 2_721_600, prunedAt: 2 }],
+      },
+    });
+    const sessionSwitch = extension?.handlers.get("session_switch")?.[0];
+    await sessionSwitch?.({ type: "session_switch" }, context);
+    expect(statuses.at(-1)).toBe("DCP −3m");
 
     const overrides = join(agentDir, "dcp-prompts", "overrides");
     const invalidOverride = join(overrides, "turn-nudge.md");
