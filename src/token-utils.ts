@@ -1,15 +1,22 @@
 import * as anthropicTokenizer from "@anthropic-ai/tokenizer";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 
+interface ReusableTokenizer {
+  encode(text: string, allowedSpecial: "all"): Uint32Array;
+}
 const tokenizer = anthropicTokenizer as typeof anthropicTokenizer & {
   default?: typeof anthropicTokenizer;
 };
-const anthropicCountTokens = tokenizer.countTokens ?? tokenizer.default?.countTokens;
+const createAnthropicTokenizer = tokenizer.getTokenizer ?? tokenizer.default?.getTokenizer;
+let sharedTokenizer: ReusableTokenizer | undefined;
 
 export function countTokens(text: string): number {
   if (!text) return 0;
   try {
-    return anthropicCountTokens ? anthropicCountTokens(text) : Math.ceil(text.length / 4);
+    sharedTokenizer ??= createAnthropicTokenizer?.();
+    return sharedTokenizer
+      ? sharedTokenizer.encode(text.normalize("NFKC"), "all").length
+      : Math.ceil(text.length / 4);
   } catch {
     return Math.ceil(text.length / 4);
   }

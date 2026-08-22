@@ -10,7 +10,7 @@ export interface LogicalMessage {
   protected: boolean;
   startIndex: number;
   endIndex: number;
-  entryIds: string[];
+  entryIds: (string | undefined)[];
   messages: AgentMessage[];
   toolCalls: ToolCall[];
   toolResults: ToolResultMessage[];
@@ -32,6 +32,59 @@ function messageKind(message: AgentMessage): LogicalMessageKind {
   if (message.role === "toolResult") return "orphan-tool-result";
   return "protected";
 }
+function cloneMutableData(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
+  if (value === null || typeof value !== "object") return value;
+
+  const cached = seen.get(value);
+  if (cached !== undefined) return cached;
+
+  if (Array.isArray(value)) {
+    const cloned: unknown[] = [];
+    seen.set(value, cloned);
+    for (const item of value) cloned.push(cloneMutableData(item, seen));
+    return cloned;
+  }
+
+  const cloned: Record<string, unknown> = {};
+  seen.set(value, cloned);
+  for (const [key, item] of Object.entries(value)) {
+    Object.defineProperty(cloned, key, {
+      value: cloneMutableData(item, seen),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return cloned;
+}
+
+
+function cloneMessageForProjection(message: AgentMessage): AgentMessage {
+  const source = message as AgentMessage & Record<string, unknown>;
+  const cloned = { ...source };
+  if (Array.isArray(source.content)) {
+    cloned.content = cloneMutableData(source.content);
+  }
+  if (Array.isArray(source.files)) {
+    cloned.files = cloneMutableData(source.files);
+  }
+  return cloned as unknown as AgentMessage;
+}
+
+export function cloneLogicalMessagesForProjection(
+  groups: readonly LogicalMessage[],
+): LogicalMessage[] {
+  return groups.map((group) => {
+    const messages = group.messages.map(cloneMessageForProjection);
+    return {
+      ...group,
+      entryIds: [...group.entryIds],
+      messages,
+      toolCalls: messages.flatMap(assistantToolCalls),
+      toolResults: messages.filter((message): message is ToolResultMessage => message.role === "toolResult"),
+    };
+  });
+}
 
 export function buildLogicalMessages(
   messages: readonly AgentMessage[],
@@ -52,7 +105,7 @@ export function buildLogicalMessages(
         protected: kind === "protected" || kind === "orphan-tool-result" || !entryId,
         startIndex: index,
         endIndex: index,
-        entryIds: entryId ? [entryId] : [],
+        entryIds: [entryId],
         messages: [message],
         toolCalls: [],
         toolResults: message.role === "toolResult" ? [message as ToolResultMessage] : [],
@@ -64,7 +117,7 @@ export function buildLogicalMessages(
     const expectedResults = new Set(toolCalls.map((call) => call.id));
     const groupedMessages: AgentMessage[] = [message];
     const toolResults: ToolResultMessage[] = [];
-    const entryIds = entryId ? [entryId] : [];
+    const entryIds: (string | undefined)[] = [entryId];
     let endIndex = index;
 
     while (expectedResults.size > 0 && endIndex + 1 < messages.length) {
@@ -74,8 +127,7 @@ export function buildLogicalMessages(
       groupedMessages.push(candidate);
       toolResults.push(candidate as ToolResultMessage);
       expectedResults.delete(candidate.toolCallId);
-      const resultEntryId = entryIdsByIndex[candidateIndex];
-      if (resultEntryId) entryIds.push(resultEntryId);
+      entryIds.push(entryIdsByIndex[candidateIndex]);
       endIndex = candidateIndex;
     }
 

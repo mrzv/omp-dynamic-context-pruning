@@ -25,14 +25,21 @@ import {
   modelThreshold,
   type DcpConfig,
 } from "./config.ts";
-import { associateEntryIds, assignStableReferences } from "./messages/identity.ts";
-import { buildLogicalMessages, type LogicalMessage } from "./messages/logical-messages.ts";
+import {
+  assignStableReferences,
+  MessageEntryAssociationCache,
+} from "./messages/identity.ts";
+import {
+  buildLogicalMessages,
+  cloneLogicalMessagesForProjection,
+  type LogicalMessage,
+} from "./messages/logical-messages.ts";
 import { injectMessageMetadata, stripDcpMetadata } from "./messages/metadata.ts";
 import { assertValidToolPairing } from "./messages/pairing.ts";
 import { MANUAL_MODE_PROMPT, PromptStore, SUBAGENT_PROMPT } from "./prompts/store.ts";
 import { appendMutation, restoreStateFromBranch } from "./state/persistence.ts";
 import { applyMutation } from "./state/runtime.ts";
-import { rebuildToolCache } from "./state/tool-cache.ts";
+import { rebuildToolCache, ToolRecordCache } from "./state/tool-cache.ts";
 import type { BlockActivationChange, PersistedMutation, RuntimeState } from "./state/types.ts";
 import { selectAutomaticPrunes, type PruningStrategyConfig } from "./strategies/pruning.ts";
 import { applySelectedToolPruning } from "./strategies/transform.ts";
@@ -47,6 +54,25 @@ export interface RegisterDcpOptions {
 
 const NOTIFICATION_TYPE = "dev.ohmypi.dcp.notification.v1";
 const STATUS_KEY = "dcp";
+const CONTEXT_SLICE_BUDGET_MS = 8;
+const SLOW_CONTEXT_TRANSFORM_MS = 100;
+
+class EventLoopBudget {
+  private sliceStartedAt = performance.now();
+  yields = 0;
+  yieldMs = 0;
+
+  async checkpoint(): Promise<void> {
+    if (performance.now() - this.sliceStartedAt < CONTEXT_SLICE_BUDGET_MS) return;
+    const startedAt = performance.now();
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, 0);
+    });
+    this.yields += 1;
+    this.yieldMs += performance.now() - startedAt;
+    this.sliceStartedAt = performance.now();
+  }
+}
 
 interface RuntimeController {
   config: DcpConfig;
@@ -57,6 +83,8 @@ interface RuntimeController {
   mutationTail: Promise<void>;
   manualCompressionGrants: number;
   reportedPromptWarnings: Set<string>;
+  messageAssociations: MessageEntryAssociationCache;
+  toolRecords: ToolRecordCache;
 }
 
 function isDcpNotification(message: AgentMessage): boolean {
@@ -109,6 +137,8 @@ function restoreController(controller: RuntimeController, context: ExtensionCont
   );
   controller.latestGroups = [];
   controller.requestSequence = 0;
+  controller.messageAssociations.reset();
+  controller.toolRecords.clear();
 }
 
 function synchronizeReferences(
@@ -573,12 +603,14 @@ async function runDecompressCommand(
 ): Promise<void> {
   const blockId = parseBlockId(argument) ?? await chooseBlock(context, controller, true);
   if (!blockId) return;
-  try {
-    applyActivation(pi, controller, planDecompress(controller.state, blockId));
-    notify(pi, context, controller.config, `Decompressed b${blockId}.`);
-  } catch (error) {
-    context.ui.notify(error instanceof Error ? error.message : String(error), "error");
-  }
+  await serializeMutation(controller, () => {
+    try {
+      applyActivation(pi, controller, planDecompress(controller.state, blockId));
+      notify(pi, context, controller.config, `Decompressed b${blockId}.`);
+    } catch (error) {
+      context.ui.notify(error instanceof Error ? error.message : String(error), "error");
+    }
+  });
 }
 
 async function runRecompressCommand(
@@ -589,49 +621,58 @@ async function runRecompressCommand(
 ): Promise<void> {
   const blockId = parseBlockId(argument) ?? await chooseBlock(context, controller, false);
   if (!blockId) return;
-  try {
-    applyActivation(pi, controller, planRecompress(controller.state, blockId));
-    notify(pi, context, controller.config, `Recompressed b${blockId}.`);
-  } catch (error) {
-    context.ui.notify(error instanceof Error ? error.message : String(error), "error");
-  }
+  await serializeMutation(controller, () => {
+    try {
+      applyActivation(pi, controller, planRecompress(controller.state, blockId));
+      notify(pi, context, controller.config, `Recompressed b${blockId}.`);
+    } catch (error) {
+      context.ui.notify(error instanceof Error ? error.message : String(error), "error");
+    }
+  });
 }
 
-function runSweepCommand(
+async function runSweepCommand(
   pi: ExtensionAPI,
   controller: RuntimeController,
   argument: string,
   context: ExtensionCommandContext,
-): void {
-  if (controller.latestGroups.length === 0) {
-    context.ui.notify("No model-visible context is available to sweep.", "warning");
-    return;
-  }
-  const rawCount = argument.trim();
-  const requested = rawCount ? (/^\d+$/.test(rawCount) ? Number(rawCount) : Number.NaN) : undefined;
-  if (requested !== undefined && (!Number.isSafeInteger(requested) || requested < 1)) {
-    context.ui.notify("Usage: /dcp-sweep [positive tool count]", "error");
-    return;
-  }
-  rebuildToolCache(controller.state, controller.latestGroups);
-  const records = selectSweepTools(
-    controller.state,
-    controller.latestGroups,
-    {
-      protectedTools: controller.config.commands.protectedTools,
-      protectedFilePatterns: controller.config.protectedFilePatterns,
-      ...(requested ? { lastN: requested } : {}),
-    },
-  );
-  if (records.length > 0) {
-    persist(pi, controller.state, {
-      version: 1,
-      at: Date.now(),
-      kind: "tools-pruned",
-      records,
-    });
-  }
-  notify(pi, context, controller.config, `Swept ${records.length} tool output${records.length === 1 ? "" : "s"}.`);
+): Promise<void> {
+  await serializeMutation(controller, () => {
+    if (controller.latestGroups.length === 0) {
+      context.ui.notify("No model-visible context is available to sweep.", "warning");
+      return;
+    }
+    const rawCount = argument.trim();
+    const requested = rawCount ? (/^\d+$/.test(rawCount) ? Number(rawCount) : Number.NaN) : undefined;
+    if (requested !== undefined && (!Number.isSafeInteger(requested) || requested < 1)) {
+      context.ui.notify("Usage: /dcp-sweep [positive tool count]", "error");
+      return;
+    }
+    rebuildToolCache(
+      controller.state,
+      controller.latestGroups,
+      controller.toolRecords,
+      (entryId) => controller.messageAssociations.fingerprintForEntryId(entryId),
+    );
+    const records = selectSweepTools(
+      controller.state,
+      controller.latestGroups,
+      {
+        protectedTools: controller.config.commands.protectedTools,
+        protectedFilePatterns: controller.config.protectedFilePatterns,
+        ...(requested ? { lastN: requested } : {}),
+      },
+    );
+    if (records.length > 0) {
+      persist(pi, controller.state, {
+        version: 1,
+        at: Date.now(),
+        kind: "tools-pruned",
+        records,
+      });
+    }
+    notify(pi, context, controller.config, `Swept ${records.length} tool output${records.length === 1 ? "" : "s"}.`);
+  });
 }
 
 async function openPanel(
@@ -661,13 +702,16 @@ async function openPanel(
     ]);
     if (!selected || selected === "Close") return;
     if (selected === toggle) {
-      persist(pi, state, { version: 1, at: Date.now(), kind: "manual-mode", enabled: !state.manualMode });
-      if (!state.manualMode) controller.manualCompressionGrants = 0;
+      await serializeMutation(controller, () => {
+        const currentState = controller.state;
+        persist(pi, currentState, { version: 1, at: Date.now(), kind: "manual-mode", enabled: !currentState.manualMode });
+        if (!currentState.manualMode) controller.manualCompressionGrants = 0;
+      });
       continue;
     }
     if (selected === "Decompress block") await runDecompressCommand(pi, controller, "", context);
     else if (selected === "Recompress block") await runRecompressCommand(pi, controller, "", context);
-    else if (selected === "Sweep tool outputs") runSweepCommand(pi, controller, "", context);
+    else if (selected === "Sweep tool outputs") await runSweepCommand(pi, controller, "", context);
     else if (selected === reloadOption) {
       if (!controller.config.experimental.customPrompts) {
         context.ui.notify("DCP custom prompt overrides are disabled. Set experimental.customPrompts to true.", "warning");
@@ -743,6 +787,8 @@ export function registerDynamicContextPruning(
     }),
     state: restoreStateFromBranch([], loaded.config.manualMode.enabled),
     latestGroups: [],
+    messageAssociations: new MessageEntryAssociationCache(),
+    toolRecords: new ToolRecordCache(),
     requestSequence: 0,
     mutationTail: Promise.resolve(),
     manualCompressionGrants: 0,
@@ -755,7 +801,7 @@ export function registerDynamicContextPruning(
   registerCommands(pi, controller);
 
   const restore = async (_event: unknown, context: ExtensionContext): Promise<void> => {
-    restoreController(controller, context);
+    await serializeMutation(controller, () => restoreController(controller, context));
     const subagentDisabled = isSubagent(context) && !controller.config.experimental.allowSubAgents;
     if (controller.config.compress.permission !== "deny") {
       const active = pi.getActiveTools();
@@ -795,18 +841,48 @@ export function registerDynamicContextPruning(
     return { systemPrompt: [...event.systemPrompt, ...additions] };
   });
 
-  pi.on("context", async (event, context) => {
+  pi.on("context", (event, context) => serializeMutation(controller, async () => {
     if (isSubagent(context) && !controller.config.experimental.allowSubAgents) return;
+    const startedAt = performance.now();
+    const budget = new EventLoopBudget();
+    const phases: Record<string, number> = {};
     controller.requestSequence += 1;
-    reloadPrompts(pi, controller, context);
-    const messages = structuredClone(event.messages)
-      .filter((message) => !isDcpNotification(message));
-    stripDcpMetadata(messages);
-    const entryIds = associateEntryIds(messages, context.sessionManager.getBranch());
-    const groups = buildLogicalMessages(messages, entryIds);
-    synchronizeReferences(pi, controller.state, groups);
-    rebuildToolCache(controller.state, groups);
 
+    let phaseStartedAt = performance.now();
+    reloadPrompts(pi, controller, context);
+    phases.prompts = performance.now() - phaseStartedAt;
+
+    phaseStartedAt = performance.now();
+    const sourceMessages = event.messages.filter((message) => !isDcpNotification(message));
+    const association = controller.messageAssociations.associate(
+      sourceMessages,
+      context.sessionManager.getBranch(),
+    );
+    phases.association = performance.now() - phaseStartedAt;
+    await budget.checkpoint();
+
+    phaseStartedAt = performance.now();
+    const messages = structuredClone(sourceMessages);
+    stripDcpMetadata(messages);
+    phases.clone = performance.now() - phaseStartedAt;
+    await budget.checkpoint();
+
+    phaseStartedAt = performance.now();
+    const groups = buildLogicalMessages(messages, association.entryIds);
+    synchronizeReferences(pi, controller.state, groups);
+    phases.grouping = performance.now() - phaseStartedAt;
+
+    phaseStartedAt = performance.now();
+    const toolCache = rebuildToolCache(
+      controller.state,
+      groups,
+      controller.toolRecords,
+      (entryId) => controller.messageAssociations.fingerprintForEntryId(entryId),
+    );
+    phases.toolCache = performance.now() - phaseStartedAt;
+    await budget.checkpoint();
+
+    phaseStartedAt = performance.now();
     const selected = selectAutomaticPrunes(controller.state, pruningConfig(controller.config));
     if (selected.length > 0) {
       persist(pi, controller.state, {
@@ -820,45 +896,80 @@ export function registerDynamicContextPruning(
       notify(pi, context, controller.config, `DCP pruned ${selected.length} tool call${selected.length === 1 ? "" : "s"}${detail}.`);
     }
     applySelectedToolPruning(groups, controller.state);
-    controller.latestGroups = structuredClone(groups);
+    controller.latestGroups = groups;
+    phases.pruning = performance.now() - phaseStartedAt;
+    await budget.checkpoint();
 
+    phaseStartedAt = performance.now();
+    const projectionGroups = cloneLogicalMessagesForProjection(groups);
     if (controller.config.compress.permission !== "deny") {
       const priorities = buildPriorityMap(
-        groups,
+        projectionGroups,
         controller.state,
         controller.config.compress.mode === "message",
         controller.config.compress.protectUserMessages,
       );
-      injectMessageMetadata(groups, priorityTags(priorities));
+      injectMessageMetadata(projectionGroups, priorityTags(priorities));
     }
-    const transformed = applyCompressedContext(groups, controller.state, controller.config.compress.mode === "message");
+    const transformed = applyCompressedContext(
+      projectionGroups,
+      controller.state,
+      controller.config.compress.mode === "message",
+    );
+    phases.projection = performance.now() - phaseStartedAt;
+    await budget.checkpoint();
+
+    phaseStartedAt = performance.now();
     appendNudge(pi, controller, context, transformed, groups);
     assertValidToolPairing(transformed);
     context.ui.setStatus(STATUS_KEY, statusText(controller.state, context.getContextUsage()));
-    if (controller.config.debug) {
-      pi.logger.debug("DCP context transformed", {
-        inputMessages: event.messages.length,
-        outputMessages: transformed.length,
-        activeBlocks: controller.state.activeBlockIds.size,
-        prunedTools: controller.state.prunedTools.size,
-      });
+    phases.finalization = performance.now() - phaseStartedAt;
+
+    const totalMs = performance.now() - startedAt;
+    const diagnostics = {
+      totalMs,
+      phases,
+      yields: budget.yields,
+      yieldMs: budget.yieldMs,
+      inputMessages: event.messages.length,
+      outputMessages: transformed.length,
+      associationFingerprints: association.stats.fingerprintedMessages,
+      indexedEntries: association.stats.indexedEntries,
+      associationReset: association.stats.reset,
+      toolCacheHits: toolCache.hits,
+      toolCacheMisses: toolCache.misses,
+      activeBlocks: controller.state.activeBlockIds.size,
+      prunedTools: controller.state.prunedTools.size,
+    };
+    if (totalMs >= SLOW_CONTEXT_TRANSFORM_MS) {
+      pi.logger.warn("DCP slow context transform", diagnostics);
+    } else if (controller.config.debug) {
+      pi.logger.debug("DCP context transformed", diagnostics);
     }
     return { messages: transformed };
-  });
+  }));
 
   pi.on("agent_end", async (event) => {
-    if (event.willContinue !== true) controller.manualCompressionGrants = 0;
+    if (event.willContinue !== true) {
+      await serializeMutation(controller, () => {
+        controller.manualCompressionGrants = 0;
+      });
+    }
   });
 
   pi.on("session_compact", async (_event, context) => {
-    persist(pi, controller.state, {
-      version: 1,
-      at: Date.now(),
-      kind: "native-compaction-reset",
-      blockIds: [...controller.state.activeBlockIds],
+    await serializeMutation(controller, () => {
+      persist(pi, controller.state, {
+        version: 1,
+        at: Date.now(),
+        kind: "native-compaction-reset",
+        blockIds: [...controller.state.activeBlockIds],
+      });
+      controller.latestGroups = [];
+      controller.messageAssociations.reset();
+      controller.toolRecords.clear();
+      context.ui.setStatus(STATUS_KEY, statusText(controller.state, context.getContextUsage()));
     });
-    controller.latestGroups = [];
-    context.ui.setStatus(STATUS_KEY, statusText(controller.state, context.getContextUsage()));
   });
 
   pi.on("session_shutdown", async (_event, context) => {

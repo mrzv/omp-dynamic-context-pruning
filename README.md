@@ -239,6 +239,8 @@ DCP invalidates provider-native replay data when it changes message content. It 
 
 The extension supports the OMP APIs in version 17.3.5. A later OMP message or session format can require a compatibility update.
 
+When `debug` is `true`, DCP logs phase timings and cache statistics for each context transform. DCP always logs a warning for transforms that take at least 100 ms.
+
 ## License and attribution
 
 This project uses the GNU Affero General Public License, version 3 or later. Read `LICENSE` and `NOTICE` for the full terms and upstream attribution.

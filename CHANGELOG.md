@@ -2,6 +2,17 @@
 
 All notable changes to this project appear in this file.
 
+## Unreleased
+
+### Changed
+
+- Reused one tokenizer for token counts during the process lifetime.
+- Cached token counts for unchanged tool records.
+- Incrementally indexed session entries while detecting in-place message rewrites.
+- Replaced a full context clone with a shallow projection copy.
+- Added event-loop checkpoints with serialized context-state mutations.
+- Added phase timings and warnings for context transforms that take at least 100 ms.
+
 ## 0.1.0 - 2026-08-17
 
 ### Added

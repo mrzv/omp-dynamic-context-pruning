@@ -11,6 +11,102 @@ export interface BranchEntryLike {
   message?: AgentMessage;
 }
 
+export interface MessageAssociationStats {
+  indexedEntries: number;
+  fingerprintedMessages: number;
+  reset: boolean;
+}
+
+export interface MessageAssociationResult {
+  entryIds: (string | undefined)[];
+  stats: MessageAssociationStats;
+}
+
+export class MessageEntryAssociationCache {
+  private branchMessages: Array<{ id: string; message: AgentMessage }> = [];
+  private fingerprintByMessage = new WeakMap<object, string>();
+  private readonly fingerprintByEntryId = new Map<string, string>();
+
+  reset(): void {
+    this.branchMessages = [];
+    this.fingerprintByMessage = new WeakMap<object, string>();
+    this.fingerprintByEntryId.clear();
+  }
+
+  fingerprintForEntryId(entryId: string): string | undefined {
+    return this.fingerprintByEntryId.get(entryId);
+  }
+
+  associate(
+    messages: readonly AgentMessage[],
+    branch: readonly BranchEntryLike[],
+  ): MessageAssociationResult {
+    const branchMessages = branch.flatMap((entry) => (
+      entry.type === "message" && entry.message ? [{ id: entry.id, message: entry.message }] : []
+    ));
+    let reset = branchMessages.length < this.branchMessages.length;
+    const branchObjects = new WeakSet<object>();
+    let fingerprintedMessages = 0;
+    const computeFingerprint = (message: AgentMessage): string => {
+      fingerprintedMessages += 1;
+      return messageFingerprint(message);
+    };
+    if (!reset) {
+      for (let index = 0; index < this.branchMessages.length; index++) {
+        const previous = this.branchMessages[index];
+        const current = branchMessages[index];
+        if (!previous || !current || previous.id !== current.id || previous.message !== current.message) {
+          reset = true;
+          break;
+        }
+        branchObjects.add(current.message);
+        const currentFingerprint = computeFingerprint(current.message);
+        if (this.fingerprintByEntryId.get(current.id) !== currentFingerprint) {
+          this.fingerprintByEntryId.set(current.id, currentFingerprint);
+          this.fingerprintByMessage.set(current.message, currentFingerprint);
+        }
+      }
+    }
+    if (reset) {
+      this.reset();
+      for (const entry of branchMessages) branchObjects.add(entry.message);
+    }
+
+    const fingerprint = (message: AgentMessage): string => {
+      const cached = branchObjects.has(message) ? this.fingerprintByMessage.get(message) : undefined;
+      if (cached) return cached;
+      const computed = computeFingerprint(message);
+      this.fingerprintByMessage.set(message, computed);
+      return computed;
+    };
+
+    let indexedEntries = 0;
+    for (let index = this.branchMessages.length; index < branchMessages.length; index++) {
+      const entry = branchMessages[index];
+      if (!entry) continue;
+      branchObjects.add(entry.message);
+      const entryFingerprint = computeFingerprint(entry.message);
+      this.fingerprintByMessage.set(entry.message, entryFingerprint);
+      this.branchMessages.push(entry);
+      this.fingerprintByEntryId.set(entry.id, entryFingerprint);
+      indexedEntries += 1;
+    }
+
+    const entriesByFingerprint = new Map<string, string[]>();
+    for (const entry of this.branchMessages) {
+      const entryFingerprint = this.fingerprintByEntryId.get(entry.id);
+      if (!entryFingerprint) continue;
+      const queue = entriesByFingerprint.get(entryFingerprint);
+      if (queue) queue.push(entry.id);
+      else entriesByFingerprint.set(entryFingerprint, [entry.id]);
+    }
+
+    return {
+      entryIds: messages.map((message) => entriesByFingerprint.get(fingerprint(message))?.shift()),
+      stats: { indexedEntries, fingerprintedMessages, reset },
+    };
+  }
+}
 export interface MessageReferenceState {
   byKey: Map<string, string>;
   byRef: Map<string, string>;
@@ -57,19 +153,7 @@ export function associateEntryIds(
   messages: readonly AgentMessage[],
   branch: readonly BranchEntryLike[],
 ): (string | undefined)[] {
-  const entriesByFingerprint = new Map<string, string[]>();
-  for (const entry of branch) {
-    if (entry.type !== "message" || !entry.message) continue;
-    const fingerprint = messageFingerprint(entry.message);
-    const queue = entriesByFingerprint.get(fingerprint);
-    if (queue) queue.push(entry.id);
-    else entriesByFingerprint.set(fingerprint, [entry.id]);
-  }
-
-  return messages.map((message) => {
-    const queue = entriesByFingerprint.get(messageFingerprint(message));
-    return queue?.shift();
-  });
+  return new MessageEntryAssociationCache().associate(messages, branch).entryIds;
 }
 
 export function formatMessageReference(index: number): string {
