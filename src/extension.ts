@@ -273,7 +273,7 @@ function reloadPrompts(
 
 function formatCompactTokenCount(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens <= 0) return "0";
-  const units = ["", "k", "m", "b", "t"] as const;
+  const units = ["", "k", "M", "B", "T"] as const;
   let value = Math.round(tokens);
   let unitIndex = 0;
   while (value >= 1_000 && unitIndex < units.length - 1) {

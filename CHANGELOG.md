@@ -13,7 +13,7 @@ All notable changes to this project appear in this file.
 - Added event-loop checkpoints with serialized context-state mutations.
 - Added phase timings and warnings for context transforms that take at least 100 ms.
 - Aggregated automatic tool-pruning notifications into one notice per completed agent run.
-- Shortened the footer status to an abbreviated cumulative removed-token count without duplicating OMP's context percentage.
+- Shortened the footer status to a cumulative removed-token count abbreviated with `k`, `M`, `B`, and `T`, without duplicating OMP's context percentage.
 
 ## 0.1.0 - 2026-08-17
 

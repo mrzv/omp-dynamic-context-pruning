@@ -122,7 +122,20 @@ describe("OMP runtime integration", () => {
     });
     const sessionSwitch = extension?.handlers.get("session_switch")?.[0];
     await sessionSwitch?.({ type: "session_switch" }, context);
-    expect(statuses.at(-1)).toBe("DCP −3m");
+    expect(statuses.at(-1)).toBe("DCP −3M");
+    branch.push({
+      type: "custom",
+      id: "status-prune-b",
+      customType: "dev.ohmypi.dcp.state.v1",
+      data: {
+        version: 1,
+        at: 3,
+        kind: "tools-pruned",
+        records: [{ toolCallId: "status-b", reason: "sweep", tokenCount: 2_997_000_000, prunedAt: 3 }],
+      },
+    });
+    await sessionSwitch?.({ type: "session_switch" }, context);
+    expect(statuses.at(-1)).toBe("DCP −3B");
 
     const overrides = join(agentDir, "dcp-prompts", "overrides");
     const invalidOverride = join(overrides, "turn-nudge.md");
