@@ -3,9 +3,9 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { loadExtensions } from "@oh-my-pi/pi-coding-agent";
+import { loadExtensions, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { isUnknownRecord } from "../src/type-guards.ts";
-import { assistantMessage, userMessage } from "./fixtures/messages.ts";
+import { assistantMessage, messageEntry, toolCall, toolResult, userMessage } from "./fixtures/messages.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -254,6 +254,154 @@ describe("OMP runtime integration", () => {
     await sessionStart?.({ type: "session_start", reason: "startup" }, subagentContext);
     expect(activeTools).not.toContain("compress");
     expect(await transform?.({ type: "context", messages: rawMessages }, subagentContext)).toBeUndefined();
+  });
+
+  test("aggregates automatic prune notifications until the agent run ends", async () => {
+    const root = temporaryDirectory();
+    const agentDir = join(root, "agent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, "dcp.jsonc"), `{
+      "pruneNotification": "detailed",
+      "pruneNotificationType": "chat",
+      "compress": { "permission": "deny" }
+    }`);
+    const extensionModule = join(root, "notification-extension.ts");
+    const source = resolve("src/extension.ts");
+    writeFileSync(extensionModule, [
+      `import { registerDynamicContextPruning } from ${JSON.stringify(source)};`,
+      "export default function (pi) {",
+      `  registerDynamicContextPruning(pi, { cwd: ${JSON.stringify(root)}, agentDir: ${JSON.stringify(agentDir)}, createGlobalConfig: false });`,
+      "}",
+    ].join("\n"));
+
+    const loaded = await loadExtensions([extensionModule], root);
+    expect(loaded.errors).toEqual([]);
+    const extension = loaded.extensions[0];
+    const chatMessages: Array<{ content: unknown; deliverAs: string | undefined }> = [];
+    const persisted: Array<{ type: "custom"; id: string; customType: string; data: unknown }> = [];
+    const messages: AgentMessage[] = [
+      userMessage("Inspect the workspace", 1),
+      assistantMessage([toolCall("bash-1", "bash", { command: "pwd" })], 2),
+      toolResult("bash-1", "/workspace", 3, false, "bash"),
+      assistantMessage([toolCall("bash-2", "bash", { command: "pwd" })], 4),
+      toolResult("bash-2", "/workspace", 5, false, "bash"),
+    ];
+    const branch = messages.map((message, index) => messageEntry(`entry-${index + 1}`, message));
+    loaded.runtime.appendEntry = (customType, data) => {
+      persisted.push({ type: "custom", id: `state-${persisted.length + 1}`, customType, data });
+    };
+    loaded.runtime.sendMessage = (message, options) => {
+      chatMessages.push({ content: typeof message === "string" ? message : message.content, deliverAs: options?.deliverAs });
+    };
+
+    let idle = false;
+    const scheduledCallbacks: Array<() => void> = [];
+
+    const context = {
+      cwd: root,
+      hasUI: true,
+      mode: "tui",
+      model: { provider: "anthropic", id: "claude", contextWindow: 200_000 },
+      getContextUsage: () => ({ tokens: 100, contextWindow: 200_000, percent: 0.05 }),
+      isIdle: () => idle,
+      setTimeout: (callback: (...args: unknown[]) => void) => {
+        scheduledCallbacks.push(() => callback());
+        return {} as ReturnType<typeof globalThis.setTimeout>;
+      },
+      sessionManager: {
+        getBranch: () => [...branch, ...persisted],
+        getSessionId: () => "notification-session",
+      },
+      ui: {
+        setStatus: () => {},
+        notify: () => {
+          throw new Error("Chat notification unexpectedly used the toast path.");
+        },
+      },
+    } as unknown as ExtensionContext;
+    const sessionStart = extension?.handlers.get("session_start")?.[0];
+    const agentStart = extension?.handlers.get("agent_start")?.[0];
+    const transform = extension?.handlers.get("context")?.[0];
+    const agentEnd = extension?.handlers.get("agent_end")?.[0];
+    const compact = extension?.handlers.get("session_compact")?.[0];
+    if (!sessionStart || !agentStart || !transform || !agentEnd || !compact) {
+      throw new Error("DCP lifecycle handlers were not registered.");
+    }
+
+    await sessionStart({ type: "session_start", reason: "startup" }, context);
+    await agentStart({ type: "agent_start" }, context);
+    await transform({ type: "context", messages }, context);
+    await agentEnd({ type: "agent_end", messages: [], willContinue: true }, context);
+    expect(chatMessages).toEqual([]);
+    await agentStart({ type: "agent_start" }, context);
+
+    const nextMessages: AgentMessage[] = [
+      assistantMessage([toolCall("bash-3", "bash", { command: "pwd" })], 6),
+      toolResult("bash-3", "/workspace", 7, false, "bash"),
+    ];
+    for (const message of nextMessages) {
+      messages.push(message);
+      branch.push(messageEntry(`entry-${branch.length + 1}`, message));
+    }
+    await transform({ type: "context", messages }, context);
+    expect(chatMessages).toEqual([]);
+
+    await agentEnd({ type: "agent_end", messages: [] }, context);
+    expect(chatMessages).toEqual([]);
+    expect(scheduledCallbacks).toHaveLength(1);
+
+    scheduledCallbacks.shift()?.();
+    expect(chatMessages).toEqual([]);
+    expect(scheduledCallbacks).toHaveLength(1);
+
+    idle = true;
+    scheduledCallbacks.shift()?.();
+    expect(chatMessages).toEqual([{
+      content: expect.stringContaining("DCP pruned 2 tool calls"),
+      deliverAs: "nextTurn",
+    }]);
+    expect(chatMessages[0]?.content).toContain("tokens removed");
+
+    await agentEnd({ type: "agent_end", messages: [] }, context);
+    expect(scheduledCallbacks).toEqual([]);
+    expect(chatMessages).toHaveLength(1);
+
+    idle = false;
+    await agentStart({ type: "agent_start" }, context);
+    const finalMessages: AgentMessage[] = [
+      assistantMessage([toolCall("bash-4", "bash", { command: "pwd" })], 8),
+      toolResult("bash-4", "/workspace", 9, false, "bash"),
+    ];
+    for (const message of finalMessages) {
+      messages.push(message);
+      branch.push(messageEntry(`entry-${branch.length + 1}`, message));
+    }
+    await transform({ type: "context", messages }, context);
+    await agentEnd({ type: "agent_end", messages: [] }, context);
+    expect(scheduledCallbacks).toHaveLength(1);
+
+    await agentStart({ type: "agent_start" }, context);
+    idle = true;
+    scheduledCallbacks.shift()?.();
+    expect(chatMessages).toHaveLength(1);
+
+    idle = false;
+    const compactionMessages: AgentMessage[] = [
+      assistantMessage([toolCall("bash-5", "bash", { command: "pwd" })], 10),
+      toolResult("bash-5", "/workspace", 11, false, "bash"),
+    ];
+    for (const message of compactionMessages) {
+      messages.push(message);
+      branch.push(messageEntry(`entry-${branch.length + 1}`, message));
+    }
+    await transform({ type: "context", messages }, context);
+    await agentEnd({ type: "agent_end", messages: [] }, context);
+    expect(scheduledCallbacks).toHaveLength(1);
+
+    await compact({ type: "session_compact", compactionEntry: {}, fromExtension: false }, context);
+    idle = true;
+    scheduledCallbacks.shift()?.();
+    expect(chatMessages).toHaveLength(1);
   });
 
   test("does not register compress when permission is deny", async () => {

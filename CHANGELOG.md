@@ -12,6 +12,7 @@ All notable changes to this project appear in this file.
 - Replaced a full context clone with a shallow projection copy.
 - Added event-loop checkpoints with serialized context-state mutations.
 - Added phase timings and warnings for context transforms that take at least 100 ms.
+- Aggregated automatic tool-pruning notifications into one notice per completed agent run.
 
 ## 0.1.0 - 2026-08-17
 

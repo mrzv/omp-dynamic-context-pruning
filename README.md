@@ -225,7 +225,7 @@ Set `experimental.allowSubAgents` to `true` to enable DCP in task subagents. The
 
 ## Notifications and state
 
-`pruneNotification` controls the detail level. `pruneNotificationType` selects chat messages or TUI notifications.
+`pruneNotification` controls the detail level. `pruneNotificationType` selects chat messages or TUI notifications. Automatic tool-pruning notices are aggregated across the agent run and emitted once when the run finishes; manual command feedback remains immediate.
 
 DCP removes its chat notifications from model input. The messages remain visible to the user.
 

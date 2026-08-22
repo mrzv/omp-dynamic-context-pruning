@@ -85,6 +85,8 @@ interface RuntimeController {
   reportedPromptWarnings: Set<string>;
   messageAssociations: MessageEntryAssociationCache;
   toolRecords: ToolRecordCache;
+  pendingPruneNotification: { toolCalls: number; tokens: number };
+  pruneNotificationGeneration: number;
 }
 
 function isDcpNotification(message: AgentMessage): boolean {
@@ -139,6 +141,7 @@ function restoreController(controller: RuntimeController, context: ExtensionCont
   controller.requestSequence = 0;
   controller.messageAssociations.reset();
   controller.toolRecords.clear();
+  resetPendingPruneNotification(controller);
 }
 
 function synchronizeReferences(
@@ -201,6 +204,53 @@ function notify(
     },
     { deliverAs: "nextTurn" },
   );
+}
+function invalidateScheduledPruneNotification(controller: RuntimeController): void {
+  controller.pruneNotificationGeneration += 1;
+}
+
+function resetPendingPruneNotification(controller: RuntimeController): void {
+  invalidateScheduledPruneNotification(controller);
+  controller.pendingPruneNotification = { toolCalls: 0, tokens: 0 };
+}
+
+
+function queuePruneNotification(controller: RuntimeController, toolCalls: number, tokens: number): void {
+  controller.pendingPruneNotification.toolCalls += toolCalls;
+  controller.pendingPruneNotification.tokens += tokens;
+}
+
+function flushPruneNotification(
+  pi: ExtensionAPI,
+  controller: RuntimeController,
+  context: ExtensionContext,
+): void {
+  const pending = controller.pendingPruneNotification;
+  controller.pendingPruneNotification = { toolCalls: 0, tokens: 0 };
+  if (pending.toolCalls === 0 || controller.config.pruneNotification === "off") return;
+  const detail = controller.config.pruneNotification === "detailed"
+    ? `; ${Math.round(pending.tokens)} tokens removed`
+    : "";
+  const message = `DCP pruned ${pending.toolCalls} tool call${pending.toolCalls === 1 ? "" : "s"}${detail}.`;
+  if (controller.config.pruneNotificationType === "toast" || !context.hasUI) {
+    notify(pi, context, controller.config, message);
+    return;
+  }
+
+  const generation = controller.pruneNotificationGeneration;
+  const sessionId = context.sessionManager.getSessionId();
+  const deliverWhenIdle = (): void => {
+    if (
+      generation !== controller.pruneNotificationGeneration
+      || sessionId !== context.sessionManager.getSessionId()
+    ) return;
+    if (!context.isIdle()) {
+      context.setTimeout(deliverWhenIdle, 25);
+      return;
+    }
+    notify(pi, context, controller.config, message);
+  };
+  context.setTimeout(deliverWhenIdle, 0);
 }
 
 function reloadPrompts(
@@ -793,6 +843,8 @@ export function registerDynamicContextPruning(
     mutationTail: Promise.resolve(),
     manualCompressionGrants: 0,
     reportedPromptWarnings: new Set(),
+    pendingPruneNotification: { toolCalls: 0, tokens: 0 },
+    pruneNotificationGeneration: 0,
   };
   pi.setLabel("Dynamic Context Pruning");
   if (!controller.config.enabled) return;
@@ -828,6 +880,10 @@ export function registerDynamicContextPruning(
   pi.on("session_switch", restore);
   pi.on("session_branch", restore);
   pi.on("session_tree", restore);
+
+  pi.on("agent_start", () => serializeMutation(controller, () => {
+    invalidateScheduledPruneNotification(controller);
+  }));
 
   pi.on("before_agent_start", async (event, context) => {
     if (isSubagent(context) && !controller.config.experimental.allowSubAgents) return;
@@ -891,9 +947,11 @@ export function registerDynamicContextPruning(
         kind: "tools-pruned",
         records: selected,
       });
-      const tokens = selected.reduce((total, record) => total + record.tokenCount, 0);
-      const detail = controller.config.pruneNotification === "detailed" ? `; ${Math.round(tokens)} tokens removed` : "";
-      notify(pi, context, controller.config, `DCP pruned ${selected.length} tool call${selected.length === 1 ? "" : "s"}${detail}.`);
+      queuePruneNotification(
+        controller,
+        selected.length,
+        selected.reduce((total, record) => total + record.tokenCount, 0),
+      );
     }
     applySelectedToolPruning(groups, controller.state);
     controller.latestGroups = groups;
@@ -949,10 +1007,11 @@ export function registerDynamicContextPruning(
     return { messages: transformed };
   }));
 
-  pi.on("agent_end", async (event) => {
+  pi.on("agent_end", async (event, context) => {
     if (event.willContinue !== true) {
       await serializeMutation(controller, () => {
         controller.manualCompressionGrants = 0;
+        flushPruneNotification(pi, controller, context);
       });
     }
   });
@@ -967,6 +1026,7 @@ export function registerDynamicContextPruning(
       });
       controller.latestGroups = [];
       controller.messageAssociations.reset();
+      resetPendingPruneNotification(controller);
       controller.toolRecords.clear();
       context.ui.setStatus(STATUS_KEY, statusText(controller.state, context.getContextUsage()));
     });
