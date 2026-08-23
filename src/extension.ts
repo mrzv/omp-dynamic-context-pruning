@@ -1,5 +1,4 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { UserMessage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { buildCompressionBlocks } from "./compress/apply.ts";
 import { prepareMessageCompression } from "./compress/message.ts";
@@ -34,13 +33,27 @@ import {
   cloneLogicalMessagesForProjection,
   type LogicalMessage,
 } from "./messages/logical-messages.ts";
+import {
+  capturePruneNotificationItems,
+  emptyPruneNotification,
+  formatCompactTokenCount,
+  formatCompressionNotification,
+  formatPruneNotification,
+  truncateToastNotification,
+  type PendingPruneNotification,
+} from "./notifications.ts";
 import { injectMessageMetadata, stripDcpMetadata } from "./messages/metadata.ts";
 import { assertValidToolPairing } from "./messages/pairing.ts";
 import { MANUAL_MODE_PROMPT, PromptStore, SUBAGENT_PROMPT } from "./prompts/store.ts";
 import { appendMutation, restoreStateFromBranch } from "./state/persistence.ts";
 import { applyMutation } from "./state/runtime.ts";
 import { rebuildToolCache, ToolRecordCache } from "./state/tool-cache.ts";
-import type { BlockActivationChange, PersistedMutation, RuntimeState } from "./state/types.ts";
+import type {
+  BlockActivationChange,
+  PersistedMutation,
+  PrunedToolRecord,
+  RuntimeState,
+} from "./state/types.ts";
 import { selectAutomaticPrunes, type PruningStrategyConfig } from "./strategies/pruning.ts";
 import { applySelectedToolPruning } from "./strategies/transform.ts";
 
@@ -85,7 +98,8 @@ interface RuntimeController {
   reportedPromptWarnings: Set<string>;
   messageAssociations: MessageEntryAssociationCache;
   toolRecords: ToolRecordCache;
-  pendingPruneNotification: { toolCalls: number; tokens: number };
+  pendingPruneNotification: PendingPruneNotification;
+  pendingCompressionNotifications: string[];
   pruneNotificationGeneration: number;
 }
 
@@ -141,7 +155,7 @@ function restoreController(controller: RuntimeController, context: ExtensionCont
   controller.requestSequence = 0;
   controller.messageAssociations.reset();
   controller.toolRecords.clear();
-  resetPendingPruneNotification(controller);
+  resetPendingNotifications(controller);
 }
 
 function synchronizeReferences(
@@ -191,7 +205,7 @@ function notify(
 ): void {
   if (config.pruneNotification === "off") return;
   if (config.pruneNotificationType === "toast" || !context.hasUI) {
-    context.ui.notify(message, level);
+    context.ui.notify(truncateToastNotification(message), level);
     return;
   }
   pi.sendMessage(
@@ -209,29 +223,45 @@ function invalidateScheduledPruneNotification(controller: RuntimeController): vo
   controller.pruneNotificationGeneration += 1;
 }
 
-function resetPendingPruneNotification(controller: RuntimeController): void {
+function resetPendingNotifications(controller: RuntimeController): void {
   invalidateScheduledPruneNotification(controller);
-  controller.pendingPruneNotification = { toolCalls: 0, tokens: 0 };
+  controller.pendingPruneNotification = emptyPruneNotification();
+  controller.pendingCompressionNotifications = [];
 }
 
-
-function queuePruneNotification(controller: RuntimeController, toolCalls: number, tokens: number): void {
-  controller.pendingPruneNotification.toolCalls += toolCalls;
-  controller.pendingPruneNotification.tokens += tokens;
+function queuePruneNotification(
+  controller: RuntimeController,
+  records: readonly PrunedToolRecord[],
+  workingDirectory: string,
+): void {
+  controller.pendingPruneNotification.items.push(
+    ...capturePruneNotificationItems(records, controller.state.toolCalls, workingDirectory),
+  );
+  controller.pendingPruneNotification.tokens += records.reduce(
+    (total, record) => total + record.tokenCount,
+    0,
+  );
 }
 
-function flushPruneNotification(
+function flushRunNotifications(
   pi: ExtensionAPI,
   controller: RuntimeController,
   context: ExtensionContext,
 ): void {
   const pending = controller.pendingPruneNotification;
-  controller.pendingPruneNotification = { toolCalls: 0, tokens: 0 };
-  if (pending.toolCalls === 0 || controller.config.pruneNotification === "off") return;
-  const detail = controller.config.pruneNotification === "detailed"
-    ? `; ${Math.round(pending.tokens)} tokens removed`
-    : "";
-  const message = `DCP pruned ${pending.toolCalls} tool call${pending.toolCalls === 1 ? "" : "s"}${detail}.`;
+  const messages = controller.pendingCompressionNotifications;
+  controller.pendingPruneNotification = emptyPruneNotification();
+  controller.pendingCompressionNotifications = [];
+  if (controller.config.pruneNotification === "off") return;
+  if (pending.items.length > 0) {
+    messages.unshift(formatPruneNotification(
+      pending,
+      controller.state.stats.totalPruneTokens,
+      controller.config.pruneNotification,
+    ));
+  }
+  if (messages.length === 0) return;
+  const message = messages.join("\n\n");
   if (controller.config.pruneNotificationType === "toast" || !context.hasUI) {
     notify(pi, context, controller.config, message);
     return;
@@ -269,23 +299,6 @@ function reloadPrompts(
   }
   controller.reportedPromptWarnings = currentWarnings;
   return warnings;
-}
-
-function formatCompactTokenCount(tokens: number): string {
-  if (!Number.isFinite(tokens) || tokens <= 0) return "0";
-  const units = ["", "k", "M", "B", "T"] as const;
-  let value = Math.round(tokens);
-  let unitIndex = 0;
-  while (value >= 1_000 && unitIndex < units.length - 1) {
-    value /= 1_000;
-    unitIndex += 1;
-  }
-  const precision = value < 100 ? 10 : 1;
-  const rounded = Math.round(value * precision) / precision;
-  if (rounded >= 1_000 && unitIndex < units.length - 1) {
-    return `1${units[unitIndex + 1]}`;
-  }
-  return `${rounded}${units[unitIndex]}`;
 }
 
 function compactStatusText(state: RuntimeState): string {
@@ -620,7 +633,20 @@ function normalizeMessageArgs(value: unknown): CompressMessageArgs {
           });
         }
         const text = compressionResultText(blocks, issues);
-        if (controller.config.compress.showCompression) notify(pi, context, controller.config, text);
+        if (blocks.length > 0 && controller.config.pruneNotification !== "off") {
+          const notification = formatCompressionNotification(
+            controller.state,
+            blocks,
+            controller.latestGroups,
+            controller.config.pruneNotification,
+            controller.config.compress.showCompression,
+          );
+          if (controller.config.pruneNotificationType === "toast" || !context.hasUI) {
+            notify(pi, context, controller.config, notification);
+          } else {
+            controller.pendingCompressionNotifications.push(notification);
+          }
+        }
         context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
         return { content: [{ type: "text" as const, text }], details: { blocks, issues } };
       });
@@ -864,7 +890,8 @@ export function registerDynamicContextPruning(
     mutationTail: Promise.resolve(),
     manualCompressionGrants: 0,
     reportedPromptWarnings: new Set(),
-    pendingPruneNotification: { toolCalls: 0, tokens: 0 },
+    pendingPruneNotification: emptyPruneNotification(),
+    pendingCompressionNotifications: [],
     pruneNotificationGeneration: 0,
   };
   pi.setLabel("Dynamic Context Pruning");
@@ -968,11 +995,7 @@ export function registerDynamicContextPruning(
         kind: "tools-pruned",
         records: selected,
       });
-      queuePruneNotification(
-        controller,
-        selected.length,
-        selected.reduce((total, record) => total + record.tokenCount, 0),
-      );
+      queuePruneNotification(controller, selected, context.cwd);
     }
     applySelectedToolPruning(groups, controller.state);
     controller.latestGroups = groups;
@@ -1032,7 +1055,7 @@ export function registerDynamicContextPruning(
     if (event.willContinue !== true) {
       await serializeMutation(controller, () => {
         controller.manualCompressionGrants = 0;
-        flushPruneNotification(pi, controller, context);
+        flushRunNotifications(pi, controller, context);
       });
     }
   });
@@ -1047,7 +1070,7 @@ export function registerDynamicContextPruning(
       });
       controller.latestGroups = [];
       controller.messageAssociations.reset();
-      resetPendingPruneNotification(controller);
+      resetPendingNotifications(controller);
       controller.toolRecords.clear();
       context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
     });

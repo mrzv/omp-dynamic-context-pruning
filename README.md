@@ -227,7 +227,7 @@ Set `experimental.allowSubAgents` to `true` to enable DCP in task subagents. The
 
 OMP currently renders extension status contributions on a separate footer row. DCP keeps its contribution compact—for example, `DCP −278k`, `DCP −3M`, or `DCP −1.2B`—and leaves context percentage reporting to OMP's built-in status line. Token counts use `k`, `M`, `B`, and `T` for thousand, million, billion, and trillion.
 
-`pruneNotification` controls the detail level. `pruneNotificationType` selects chat messages or TUI notifications. Automatic tool-pruning notices are aggregated across the agent run and emitted once when the run finishes; manual command feedback remains immediate.
+`pruneNotification` controls the detail level. `pruneNotificationType` selects chat messages or TUI notifications. Automatic tool-pruning notices are aggregated across the agent run and emitted once when the run finishes; manual command feedback remains immediate. Detailed notices show cumulative and per-operation token removal, pruning reasons, affected tool names and identifying arguments, plus compression run metrics, topics, message/tool counts, summary-token cost, and a context-history progress bar. Minimal notices remain single-line summaries. `compress.showCompression` adds the generated summary text to the compression notice; it does not suppress the base compression metrics. Toast bodies are bounded to keep the TUI usable.
 
 DCP removes its chat notifications from model input. The messages remain visible to the user.
 

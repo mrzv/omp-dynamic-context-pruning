@@ -14,6 +14,7 @@ All notable changes to this project appear in this file.
 - Added phase timings and warnings for context transforms that take at least 100 ms.
 - Aggregated automatic tool-pruning notifications into one notice per completed agent run.
 - Shortened the footer status to a cumulative removed-token count abbreviated with `k`, `M`, `B`, and `T`, without duplicating OMP's context percentage.
+- Expanded detailed pruning and compression notifications with token metrics, reasons, affected tools, topics, item counts, summary cost, and context progress while retaining one end-of-run chat delivery.
 
 ## 0.1.0 - 2026-08-17
 

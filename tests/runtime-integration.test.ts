@@ -25,7 +25,8 @@ describe("OMP runtime integration", () => {
     const agentDir = join(root, "agent");
     mkdirSync(agentDir, { recursive: true });
     writeFileSync(join(agentDir, "dcp.jsonc"), `{
-      "pruneNotification": "off",
+      "pruneNotification": "detailed",
+      "pruneNotificationType": "toast",
       "compress": { "permission": "ask", "nudgeForce": "strong", "minContextLimit": 0, "maxContextLimit": 999999 },
       "experimental": { "customPrompts": true }
     }`);
@@ -200,6 +201,10 @@ describe("OMP runtime integration", () => {
       && toolResult.content[0].type === "text",
     ).toBe(true);
     expect(persisted.some((entry) => isUnknownRecord(entry.data) && entry.data.kind === "compression-created")).toBe(true);
+    expect(notifications.at(-1)).toContain("▣ DCP |");
+    expect(notifications.at(-1)).toContain("▣ Compression #1");
+    expect(notifications.at(-1)).toContain("→ Topic: parser research");
+    expect(notifications.at(-1)).toContain("→ Items: 2 messages compressed");
 
     const compressed = await transform?.({ type: "context", messages: rawMessages }, context);
     if (!isUnknownRecord(compressed) || !Array.isArray(compressed.messages)) throw new Error("Context handler returned no messages.");
@@ -396,11 +401,12 @@ describe("OMP runtime integration", () => {
 
     idle = true;
     scheduledCallbacks.shift()?.();
-    expect(chatMessages).toEqual([{
-      content: expect.stringContaining("DCP pruned 2 tool calls"),
-      deliverAs: "nextTurn",
-    }]);
-    expect(chatMessages[0]?.content).toContain("tokens removed");
+    expect(chatMessages).toHaveLength(1);
+    expect(chatMessages[0]?.deliverAs).toBe("nextTurn");
+    expect(chatMessages[0]?.content).toContain("▣ DCP | −");
+    expect(chatMessages[0]?.content).toContain("▣ Duplicate Removal");
+    expect(chatMessages[0]?.content).toContain("2 tools");
+    expect(chatMessages[0]?.content).toContain("→ bash: pwd");
 
     await agentEnd({ type: "agent_end", messages: [] }, context);
     expect(scheduledCallbacks).toEqual([]);

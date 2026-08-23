@@ -12,7 +12,7 @@ import type {
 const BLOCK_PLACEHOLDER = /\(b(\d+)\)|\{block_(\d+)\}/gi;
 export const COMPRESSED_BLOCK_HEADER = "[Compressed conversation section]";
 
-function restoreSummary(summary: string): string {
+export function unwrapCompressedSummary(summary: string): string {
   const withoutHeader = summary.replace(/^\s*\[Compressed conversation section\](?:\r?\n)*/i, "");
   return withoutHeader
     .replace(/(?:\r?\n)*<dcp-message-id>b\d+<\/dcp-message-id>\s*$/i, "")
@@ -42,7 +42,7 @@ export function expandNestedSummaries(
     const block = activeBlocks.get(blockId);
     if (!block || !required.has(blockId) || consumed.has(blockId)) continue;
     expanded += summary.slice(cursor, placeholder.index);
-    expanded += restoreSummary(block.summary);
+    expanded += unwrapCompressedSummary(block.summary);
     cursor = (placeholder.index ?? 0) + placeholder[0].length;
     consumed.add(blockId);
   }
@@ -52,14 +52,14 @@ export function expandNestedSummaries(
     ? activeBlocks.get(startBoundaryId)
     : undefined;
   if (prependBoundary) {
-    expanded = `${restoreSummary(prependBoundary.summary).trim()}\n\n${expanded.trim()}`.trim();
+    expanded = `${unwrapCompressedSummary(prependBoundary.summary).trim()}\n\n${expanded.trim()}`.trim();
     consumed.add(prependBoundary.blockId);
   }
   const appendBoundary = endBoundaryId !== undefined && !consumed.has(endBoundaryId)
     ? activeBlocks.get(endBoundaryId)
     : undefined;
   if (appendBoundary) {
-    expanded = `${expanded.trim()}\n\n${restoreSummary(appendBoundary.summary).trim()}`.trim();
+    expanded = `${expanded.trim()}\n\n${unwrapCompressedSummary(appendBoundary.summary).trim()}`.trim();
     consumed.add(appendBoundary.blockId);
   }
 
@@ -70,7 +70,7 @@ export function expandNestedSummaries(
       const block = activeBlocks.get(blockId);
       if (!block) throw new Error(`Compressed block not found: b${blockId}`);
       consumed.add(blockId);
-      return `\n### (b${blockId})\n${restoreSummary(block.summary)}`;
+      return `\n### (b${blockId})\n${unwrapCompressedSummary(block.summary)}`;
     });
     expanded += "\n\nThe following previously compressed summaries were also part of this conversation section:";
     expanded += sections.join("");
