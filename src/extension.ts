@@ -99,7 +99,6 @@ interface RuntimeController {
   messageAssociations: MessageEntryAssociationCache;
   toolRecords: ToolRecordCache;
   pendingPruneNotification: PendingPruneNotification;
-  pendingCompressionNotifications: string[];
   pruneNotificationGeneration: number;
 }
 
@@ -155,7 +154,7 @@ function restoreController(controller: RuntimeController, context: ExtensionCont
   controller.requestSequence = 0;
   controller.messageAssociations.reset();
   controller.toolRecords.clear();
-  resetPendingNotifications(controller);
+  resetPendingPruneNotification(controller);
 }
 
 function synchronizeReferences(
@@ -223,10 +222,9 @@ function invalidateScheduledPruneNotification(controller: RuntimeController): vo
   controller.pruneNotificationGeneration += 1;
 }
 
-function resetPendingNotifications(controller: RuntimeController): void {
+function resetPendingPruneNotification(controller: RuntimeController): void {
   invalidateScheduledPruneNotification(controller);
   controller.pendingPruneNotification = emptyPruneNotification();
-  controller.pendingCompressionNotifications = [];
 }
 
 function queuePruneNotification(
@@ -243,25 +241,19 @@ function queuePruneNotification(
   );
 }
 
-function flushRunNotifications(
+function flushPruneNotification(
   pi: ExtensionAPI,
   controller: RuntimeController,
   context: ExtensionContext,
 ): void {
   const pending = controller.pendingPruneNotification;
-  const messages = controller.pendingCompressionNotifications;
   controller.pendingPruneNotification = emptyPruneNotification();
-  controller.pendingCompressionNotifications = [];
-  if (controller.config.pruneNotification === "off") return;
-  if (pending.items.length > 0) {
-    messages.unshift(formatPruneNotification(
-      pending,
-      controller.state.stats.totalPruneTokens,
-      controller.config.pruneNotification,
-    ));
-  }
-  if (messages.length === 0) return;
-  const message = messages.join("\n\n");
+  if (controller.config.pruneNotification === "off" || pending.items.length === 0) return;
+  const message = formatPruneNotification(
+    pending,
+    controller.state.stats.totalPruneTokens,
+    controller.config.pruneNotification,
+  );
   if (controller.config.pruneNotificationType === "toast" || !context.hasUI) {
     notify(pi, context, controller.config, message);
     return;
@@ -641,11 +633,7 @@ function normalizeMessageArgs(value: unknown): CompressMessageArgs {
             controller.config.pruneNotification,
             controller.config.compress.showCompression,
           );
-          if (controller.config.pruneNotificationType === "toast" || !context.hasUI) {
-            notify(pi, context, controller.config, notification);
-          } else {
-            controller.pendingCompressionNotifications.push(notification);
-          }
+          context.ui.notify(truncateToastNotification(notification), "info");
         }
         context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
         return { content: [{ type: "text" as const, text }], details: { blocks, issues } };
@@ -891,7 +879,6 @@ export function registerDynamicContextPruning(
     manualCompressionGrants: 0,
     reportedPromptWarnings: new Set(),
     pendingPruneNotification: emptyPruneNotification(),
-    pendingCompressionNotifications: [],
     pruneNotificationGeneration: 0,
   };
   pi.setLabel("Dynamic Context Pruning");
@@ -1055,7 +1042,7 @@ export function registerDynamicContextPruning(
     if (event.willContinue !== true) {
       await serializeMutation(controller, () => {
         controller.manualCompressionGrants = 0;
-        flushRunNotifications(pi, controller, context);
+        flushPruneNotification(pi, controller, context);
       });
     }
   });
@@ -1070,7 +1057,7 @@ export function registerDynamicContextPruning(
       });
       controller.latestGroups = [];
       controller.messageAssociations.reset();
-      resetPendingNotifications(controller);
+      resetPendingPruneNotification(controller);
       controller.toolRecords.clear();
       context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
     });

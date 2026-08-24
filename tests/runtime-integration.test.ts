@@ -26,7 +26,7 @@ describe("OMP runtime integration", () => {
     mkdirSync(agentDir, { recursive: true });
     writeFileSync(join(agentDir, "dcp.jsonc"), `{
       "pruneNotification": "detailed",
-      "pruneNotificationType": "toast",
+      "pruneNotificationType": "chat",
       "compress": { "permission": "ask", "nudgeForce": "strong", "minContextLimit": 0, "maxContextLimit": 999999 },
       "experimental": { "customPrompts": true }
     }`);
@@ -50,6 +50,7 @@ describe("OMP runtime integration", () => {
     const selections: string[] = [];
     const statuses: Array<string | undefined> = [];
     const notifications: string[] = [];
+    const chatNotifications: unknown[] = [];
     loaded.runtime.appendEntry = (customType, data) => {
       persisted.push({ type: "custom", id: `state-${persisted.length + 1}`, customType, data });
     };
@@ -57,7 +58,9 @@ describe("OMP runtime integration", () => {
     loaded.runtime.setActiveTools = async (names) => {
       activeTools = [...names];
     };
-    loaded.runtime.sendMessage = () => {};
+    loaded.runtime.sendMessage = (message) => {
+      chatNotifications.push(message);
+    };
     loaded.runtime.sendUserMessage = () => {};
 
     const rawMessages: AgentMessage[] = [
@@ -205,6 +208,7 @@ describe("OMP runtime integration", () => {
     expect(notifications.at(-1)).toContain("▣ Compression #1");
     expect(notifications.at(-1)).toContain("→ Topic: parser research");
     expect(notifications.at(-1)).toContain("→ Items: 2 messages compressed");
+    expect(chatNotifications).toEqual([]);
 
     const compressed = await transform?.({ type: "context", messages: rawMessages }, context);
     if (!isUnknownRecord(compressed) || !Array.isArray(compressed.messages)) throw new Error("Context handler returned no messages.");
