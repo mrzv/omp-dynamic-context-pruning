@@ -15,6 +15,7 @@ All notable changes to this project appear in this file.
 - Aggregated automatic tool-pruning notifications into one notice per completed agent run.
 - Shortened the footer status to a cumulative removed-token count abbreviated with `k`, `M`, `B`, and `T`, without duplicating OMP's context percentage.
 - Expanded detailed pruning and compression notifications with token metrics, reasons, affected tools, topics, item counts, summary cost, and context progress. Compression notices now appear immediately without interrupting the active tool run; automatic pruning retains one end-of-run chat delivery.
+- Prevented `/btw` side requests from forwarding incomplete tool-call groups to the model.
 
 ## 0.1.0 - 2026-08-17
 

@@ -85,6 +85,52 @@ export function cloneLogicalMessagesForProjection(
     };
   });
 }
+export interface OmittedIncompleteToolGroup {
+  startIndex: number;
+  missingToolCallIds: string[];
+}
+
+export interface ToolGroupProjectionRepair {
+  groups: LogicalMessage[];
+  omitted: OmittedIncompleteToolGroup[];
+}
+
+export function omitIncompleteToolGroupsForProjection(
+  groups: readonly LogicalMessage[],
+): ToolGroupProjectionRepair {
+  const retained: LogicalMessage[] = [];
+  const omitted: OmittedIncompleteToolGroup[] = [];
+  const callIdCounts = new Map<string, number>();
+  for (const group of groups) {
+    for (const call of group.toolCalls) {
+      callIdCounts.set(call.id, (callIdCounts.get(call.id) ?? 0) + 1);
+    }
+  }
+
+  for (const group of groups) {
+    if (group.kind !== "assistant" || group.toolCalls.length === 0) {
+      retained.push(group);
+      continue;
+    }
+
+    const callIds = group.toolCalls.map((call) => call.id);
+    if (callIds.some((id) => callIdCounts.get(id) !== 1)) {
+      retained.push(group);
+      continue;
+    }
+
+    const resultIds = new Set(group.toolResults.map((result) => result.toolCallId));
+    const missingToolCallIds = callIds.filter((id) => !resultIds.has(id));
+    if (missingToolCallIds.length === 0) {
+      retained.push(group);
+      continue;
+    }
+
+    omitted.push({ startIndex: group.startIndex, missingToolCallIds });
+  }
+
+  return { groups: retained, omitted };
+}
 
 export function buildLogicalMessages(
   messages: readonly AgentMessage[],

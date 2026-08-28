@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { loadExtensions, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { findToolPairingIssues } from "../src/messages/pairing.ts";
 import { isUnknownRecord } from "../src/type-guards.ts";
 import { assistantMessage, messageEntry, toolCall, toolResult, userMessage } from "./fixtures/messages.ts";
 
@@ -179,6 +180,31 @@ describe("OMP runtime integration", () => {
     expect(JSON.stringify(first.messages[0])).toContain("m0001");
     expect(JSON.stringify(first.messages[1])).toContain("m0002");
     expect(JSON.stringify(first.messages[0])).toContain("Evaluate the conversation");
+
+    const pendingSideTurn: AgentMessage[] = [
+      rawMessages[0]!,
+      assistantMessage([toolCall("pending-side-call", "read")], 3),
+      {
+        role: "developer",
+        content: [{ type: "text", text: "Answer without executing tools." }],
+        attribution: "agent",
+        timestamp: 4,
+      },
+      userMessage("What is the current status?", 5),
+    ];
+    const pendingSideTurnSnapshot = structuredClone(pendingSideTurn);
+    const repairedSideTurn = await transform?.(
+      { type: "context", messages: pendingSideTurn },
+      context,
+    );
+    if (!isUnknownRecord(repairedSideTurn) || !Array.isArray(repairedSideTurn.messages)) {
+      throw new Error("Context handler returned no messages.");
+    }
+    expect(findToolPairingIssues(repairedSideTurn.messages as AgentMessage[])).toEqual([]);
+    expect(JSON.stringify(repairedSideTurn.messages)).not.toContain("pending-side-call");
+    expect(JSON.stringify(repairedSideTurn.messages)).toContain("What is the current status?");
+    expect(pendingSideTurn).toEqual(pendingSideTurnSnapshot);
+    await transform?.({ type: "context", messages: rawMessages }, context);
 
     const compress = extension?.tools.get("compress")?.definition;
     if (!compress) throw new Error("Compress tool was not registered.");

@@ -31,6 +31,7 @@ import {
 import {
   buildLogicalMessages,
   cloneLogicalMessagesForProjection,
+  omitIncompleteToolGroupsForProjection,
   type LogicalMessage,
 } from "./messages/logical-messages.ts";
 import {
@@ -990,7 +991,15 @@ export function registerDynamicContextPruning(
     await budget.checkpoint();
 
     phaseStartedAt = performance.now();
-    const projectionGroups = cloneLogicalMessagesForProjection(groups);
+    const projectionRepair = omitIncompleteToolGroupsForProjection(
+      cloneLogicalMessagesForProjection(groups),
+    );
+    const projectionGroups = projectionRepair.groups;
+    if (projectionRepair.omitted.length > 0) {
+      pi.logger.warn("DCP omitted incomplete tool groups from request projection", {
+        groups: projectionRepair.omitted,
+      });
+    }
     if (controller.config.compress.permission !== "deny") {
       const priorities = buildPriorityMap(
         projectionGroups,
@@ -1029,6 +1038,7 @@ export function registerDynamicContextPruning(
       toolCacheMisses: toolCache.misses,
       activeBlocks: controller.state.activeBlockIds.size,
       prunedTools: controller.state.prunedTools.size,
+      omittedIncompleteToolGroups: projectionRepair.omitted.length,
     };
     if (totalMs >= SLOW_CONTEXT_TRANSFORM_MS) {
       pi.logger.warn("DCP slow context transform", diagnostics);
