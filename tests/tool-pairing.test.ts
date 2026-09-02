@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { assertValidToolPairing, findToolPairingIssues } from "../src/messages/pairing.ts";
+import {
+  assertValidToolPairing,
+  assertValidToolPairingProjection,
+  findToolPairingIssues,
+} from "../src/messages/pairing.ts";
 import { assistantMessage, toolCall, toolResult } from "./fixtures/messages.ts";
 
 describe("tool pairing invariants", () => {
@@ -23,6 +27,25 @@ describe("tool pairing invariants", () => {
       { kind: "missing-result", toolCallId: "expected", messageIndex: 0 },
     ]);
     expect(() => assertValidToolPairing(messages)).toThrow("invalid tool history");
+  });
+
+  test("permits only provider-replayed orphan results already present in the source", () => {
+    const replayedResult = toolResult("provider-replayed", "preserved output", 2);
+    const source = [replayedResult];
+    const projected = [
+      { role: "user", content: "Native compaction summary", timestamp: 1 } as const,
+      replayedResult,
+    ];
+
+    expect(() => assertValidToolPairingProjection(source, projected)).not.toThrow();
+    expect(() => assertValidToolPairingProjection(
+      [assistantMessage([toolCall("provider-replayed", "read")], 1), replayedResult],
+      projected,
+    )).toThrow("orphan-result:provider-replayed@1");
+    expect(() => assertValidToolPairingProjection(
+      source,
+      [replayedResult, replayedResult],
+    )).toThrow("duplicate-result:provider-replayed@1");
   });
 
   test("rejects results before or outside their assistant batch", () => {

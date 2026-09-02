@@ -41,9 +41,15 @@ function invalidateNativeReplay(value: Record<string, unknown>): void {
   delete value.providerPayload;
 }
 
+function hasOpaqueProviderReplay(message: AgentMessage): boolean {
+  const value = message as AgentMessage & Record<string, unknown>;
+  return value.role === "user" && value.providerPayload !== undefined;
+}
+
 export function stripDcpMetadata(messages: readonly AgentMessage[]): void {
   for (const message of messages) {
     const value = message as AgentMessage & Record<string, unknown>;
+    if (hasOpaqueProviderReplay(message)) continue;
     let changed = false;
     if (typeof value.content === "string") {
       const stripped = stripDcpMetadataFromText(value.content);
@@ -138,6 +144,7 @@ export function injectMessageMetadata(
   blockedKeys?: ReadonlySet<string>,
 ): void {
   for (const group of groups) {
+    if (group.messages.some(hasOpaqueProviderReplay)) continue;
     const blocked = !group.ref || (group.key ? blockedKeys?.has(group.key) === true : true);
     if (blocked && group.kind === "protected") continue;
     if (group.kind === "assistant" && group.protected && group.toolCalls.length > group.toolResults.length) {

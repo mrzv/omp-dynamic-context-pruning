@@ -6,7 +6,13 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { loadExtensions, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { findToolPairingIssues } from "../src/messages/pairing.ts";
 import { isUnknownRecord } from "../src/type-guards.ts";
-import { assistantMessage, messageEntry, toolCall, toolResult, userMessage } from "./fixtures/messages.ts";
+import {
+  assistantMessage,
+  messageEntry,
+  toolCall,
+  toolResult,
+  userMessage,
+} from "./fixtures/messages.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -213,7 +219,7 @@ describe("OMP runtime integration", () => {
     if (!sweepCommand) throw new Error("DCP sweep command was not registered.");
     await Reflect.apply(sweepCommand.handler, sweepCommand, ["2oops", context]);
     expect(notifications.at(-1)).toContain("Usage: /dcp-sweep");
-    const toolResult: unknown = await Reflect.apply(compress.execute, compress, [
+    const compressionToolResult: unknown = await Reflect.apply(compress.execute, compress, [
       "compress-call",
       {
         topic: "parser research",
@@ -224,10 +230,10 @@ describe("OMP runtime integration", () => {
       context,
     ]);
     expect(
-      isUnknownRecord(toolResult)
-      && Array.isArray(toolResult.content)
-      && isUnknownRecord(toolResult.content[0])
-      && toolResult.content[0].type === "text",
+      isUnknownRecord(compressionToolResult)
+      && Array.isArray(compressionToolResult.content)
+      && isUnknownRecord(compressionToolResult.content[0])
+      && compressionToolResult.content[0].type === "text",
     ).toBe(true);
     expect(persisted.some((entry) => isUnknownRecord(entry.data) && entry.data.kind === "compression-created")).toBe(true);
     expect(notifications.at(-1)).toContain("▣ DCP |");
@@ -249,6 +255,25 @@ describe("OMP runtime integration", () => {
     expect(restored.messages).toHaveLength(2);
     expect(JSON.stringify(restored.messages[0])).toContain("m0001");
     expect(JSON.stringify(restored.messages[1])).toContain("m0002");
+
+    const providerReplaySummary = userMessage("Native compaction summary", 10);
+    providerReplaySummary.providerPayload = {
+      type: "openaiResponsesHistory",
+      items: [{ type: "message", content: "preserved replay" }],
+    };
+    const providerReplayMessages: AgentMessage[] = [
+      providerReplaySummary,
+      toolResult("provider-replayed", "preserved output", 11),
+    ];
+    const providerReplay = await transform?.(
+      { type: "context", messages: providerReplayMessages },
+      context,
+    );
+    if (!isUnknownRecord(providerReplay) || !Array.isArray(providerReplay.messages)) {
+      throw new Error("Context handler rejected provider-replayed messages.");
+    }
+    expect(providerReplay.messages.map((message) => message.role)).toEqual(["user", "toolResult"]);
+    expect(providerReplay.messages[0]).toHaveProperty("providerPayload");
     const resetsBefore = persisted.filter(
       (entry) => isUnknownRecord(entry.data) && entry.data.kind === "native-compaction-reset",
     ).length;

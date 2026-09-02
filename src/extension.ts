@@ -44,7 +44,7 @@ import {
   type PendingPruneNotification,
 } from "./notifications.ts";
 import { injectMessageMetadata, stripDcpMetadata } from "./messages/metadata.ts";
-import { assertValidToolPairing } from "./messages/pairing.ts";
+import { assertValidToolPairingProjection } from "./messages/pairing.ts";
 import { MANUAL_MODE_PROMPT, PromptStore, SUBAGENT_PROMPT } from "./prompts/store.ts";
 import { appendMutation, restoreStateFromBranch } from "./state/persistence.ts";
 import { applyMutation } from "./state/runtime.ts";
@@ -1019,7 +1019,7 @@ export function registerDynamicContextPruning(
 
     phaseStartedAt = performance.now();
     appendNudge(pi, controller, context, transformed, groups);
-    assertValidToolPairing(transformed);
+    assertValidToolPairingProjection(messages, transformed);
     context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
     phases.finalization = performance.now() - phaseStartedAt;
 

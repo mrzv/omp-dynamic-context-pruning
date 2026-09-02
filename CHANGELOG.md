@@ -17,6 +17,7 @@ All notable changes to this project appear in this file.
 - Expanded detailed pruning and compression notifications with token metrics, reasons, affected tools, topics, item counts, summary cost, and context progress. Compression notices now appear immediately without interrupting the active tool run; automatic pruning retains one end-of-run chat delivery.
 - Prevented `/btw` side requests from forwarding incomplete tool-call groups to the model.
 - Omitted detached trailing tool results with their incomplete assistant batch, preventing invalid `orphan-result` projections.
+- Preserved opaque native-compaction replay payloads and accepted only source-existing orphan results at provider replay boundaries.
 
 ## 0.1.0 - 2026-08-17
 

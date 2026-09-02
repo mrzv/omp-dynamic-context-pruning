@@ -69,3 +69,31 @@ export function assertValidToolPairing(
     .join(", ");
   throw new Error(`DCP produced invalid tool history: ${description}`);
 }
+
+/**
+ * Accept provider-replayed orphan results that already existed in the source,
+ * while still rejecting every pairing issue introduced by DCP's projection.
+ */
+export function assertValidToolPairingProjection(
+  sourceMessages: readonly AgentMessage[],
+  projectedMessages: readonly AgentMessage[],
+): void {
+  const allowedOrphans = new Map<string, number>();
+  for (const issue of findToolPairingIssues(sourceMessages)) {
+    if (issue.kind !== "orphan-result") continue;
+    allowedOrphans.set(issue.toolCallId, (allowedOrphans.get(issue.toolCallId) ?? 0) + 1);
+  }
+
+  const issues = findToolPairingIssues(projectedMessages).filter((issue) => {
+    if (issue.kind !== "orphan-result") return true;
+    const remaining = allowedOrphans.get(issue.toolCallId) ?? 0;
+    if (remaining === 0) return true;
+    allowedOrphans.set(issue.toolCallId, remaining - 1);
+    return false;
+  });
+  if (issues.length === 0) return;
+  const description = issues
+    .map((issue) => `${issue.kind}:${issue.toolCallId}@${issue.messageIndex}`)
+    .join(", ");
+  throw new Error(`DCP produced invalid tool history: ${description}`);
+}
