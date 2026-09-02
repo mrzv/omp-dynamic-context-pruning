@@ -101,6 +101,7 @@ export function omitIncompleteToolGroupsForProjection(
   const retained: LogicalMessage[] = [];
   const omitted: OmittedIncompleteToolGroup[] = [];
   const callIdCounts = new Map<string, number>();
+  const omittedCallStartIndices = new Map<string, number>();
   for (const group of groups) {
     for (const call of group.toolCalls) {
       callIdCounts.set(call.id, (callIdCounts.get(call.id) ?? 0) + 1);
@@ -108,6 +109,16 @@ export function omitIncompleteToolGroupsForProjection(
   }
 
   for (const group of groups) {
+    if (group.kind === "orphan-tool-result") {
+      const result = group.toolResults[0];
+      const omittedStartIndex = result
+        ? omittedCallStartIndices.get(result.toolCallId)
+        : undefined;
+      if (result && omittedStartIndex !== undefined && omittedStartIndex < group.startIndex) {
+        omittedCallStartIndices.delete(result.toolCallId);
+        continue;
+      }
+    }
     if (group.kind !== "assistant" || group.toolCalls.length === 0) {
       retained.push(group);
       continue;
@@ -127,6 +138,7 @@ export function omitIncompleteToolGroupsForProjection(
     }
 
     omitted.push({ startIndex: group.startIndex, missingToolCallIds });
+    for (const id of missingToolCallIds) omittedCallStartIndices.set(id, group.startIndex);
   }
 
   return { groups: retained, omitted };
