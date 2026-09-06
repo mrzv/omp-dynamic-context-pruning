@@ -1,7 +1,7 @@
+import { effectiveActiveBlocks } from "./active-blocks.ts";
 import { parseMessageReference } from "../messages/identity.ts";
-import type { LogicalMessage } from "../messages/logical-messages.ts";
-import type { CompressionBlock, RuntimeState } from "../state/types.ts";
-import { replayUnsafeBlockIds } from "./replay-protection.ts";
+import { hasOpaqueProviderReplay, type LogicalMessage } from "../messages/logical-messages.ts";
+import type { RuntimeState } from "../state/types.ts";
 import { countMessagesTokens } from "../token-utils.ts";
 import type {
   BoundaryReference,
@@ -34,11 +34,7 @@ export function buildCompressionSearchContext(
     groupByKey.set(group.key, group);
     indexByKey.set(group.key, index);
   }
-  const activeBlocks = new Map<number, CompressionBlock>();
-  const unsafeBlocks = replayUnsafeBlockIds(state, groups);
-  for (const [blockId, block] of state.blocks) {
-    if (block.active && !unsafeBlocks.has(blockId)) activeBlocks.set(blockId, block);
-  }
+  const activeBlocks = effectiveActiveBlocks(state, groups);
   return { groups, groupByKey, indexByKey, activeBlocks };
 }
 
@@ -95,7 +91,10 @@ export function resolveSelection(
 
   for (let index = startReference.groupIndex; index <= endReference.groupIndex; index++) {
     const group = context.groups[index];
-    if (!group?.key || group.protected || hasProviderNativeToolHistory(group)) continue;
+    if (
+      !group?.key || group.protected || group.messages.some(hasOpaqueProviderReplay)
+      || hasProviderNativeToolHistory(group)
+    ) continue;
     groups.push(group);
     groupKeys.push(group.key);
     tokensByKey.set(group.key, countMessagesTokens(group.messages));
@@ -121,6 +120,7 @@ export function resolveSelection(
     tokensByKey,
     toolCallIds,
     requiredBlockIds,
+    activeBlocks: context.activeBlocks,
   };
 }
 

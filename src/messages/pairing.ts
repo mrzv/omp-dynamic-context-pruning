@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { isDeepStrictEqual } from "node:util";
 import { assistantToolCalls, getProjectionSource, hasOpaqueProviderReplay } from "./logical-messages.ts";
 
 export type PairingIssueKind = "duplicate-call" | "duplicate-result" | "orphan-result" | "missing-result";
@@ -103,13 +104,10 @@ export function assertValidToolPairingProjection(
   projectedMessages: readonly AgentMessage[],
 ): void {
   const projectedIssues = findToolPairingIssues(projectedMessages);
-  // An opaque payload can contain the entire history, even when no visible
-  // tool results remain. The pairing fast path must not bypass its preservation.
-  const replayIndices = new Set<number>();
-  sourceMessages.forEach((message, index) => {
-    if (hasOpaqueProviderReplay(message)) replayIndices.add(index);
-  });
-  if (projectedIssues.length === 0 && replayIndices.size === 0) return;
+  const replayIndices = sourceMessages.flatMap((message, index) => (
+    hasOpaqueProviderReplay(message) ? [index] : []
+  ));
+  if (projectedIssues.length === 0 && replayIndices.length === 0) return;
 
   const sourceBoundaries = replayBoundaries(sourceMessages);
   const projectedBoundaries = replayBoundaries(projectedMessages);
@@ -135,25 +133,6 @@ export function assertValidToolPairingProjection(
     return undefined;
   };
 
-  const retainedReplays = new Set<number>();
-  const replayIssues: string[] = [];
-  for (const message of projectedMessages) {
-    const index = sourceIndex(message);
-    if (index === undefined || !replayIndices.has(index)) continue;
-    const original = sourceMessages[index] as AgentMessage & Record<string, unknown>;
-    const projected = message as AgentMessage & Record<string, unknown>;
-    if (projected.role !== original.role || projected.providerPayload !== original.providerPayload) {
-      replayIssues.push(`modified-provider-replay@${index}`);
-    } else if (retainedReplays.has(index)) {
-      replayIssues.push(`duplicate-provider-replay@${index}`);
-    } else {
-      retainedReplays.add(index);
-    }
-  }
-  for (const index of replayIndices) {
-    if (!retainedReplays.has(index)) replayIssues.push(`missing-provider-replay@${index}`);
-  }
-
   const issues = projectedIssues.filter((issue) => {
     if (issue.kind !== "orphan-result") return true;
     const originalIndex = sourceIndex(projectedMessages[issue.messageIndex]);
@@ -171,10 +150,31 @@ export function assertValidToolPairingProjection(
     allowedOrphans.delete(originalIndex);
     return false;
   });
-  if (issues.length === 0 && replayIssues.length === 0) return;
-  const description = [
-    ...issues.map((issue) => `${issue.kind}:${issue.toolCallId}@${issue.messageIndex}`),
-    ...replayIssues,
-  ].join(", ");
-  throw new Error(`DCP produced invalid tool history: ${description}`);
+  if (issues.length > 0) {
+    const description = issues
+      .map((issue) => `${issue.kind}:${issue.toolCallId}@${issue.messageIndex}`)
+      .join(", ");
+    throw new Error(`DCP produced invalid tool history: ${description}`);
+  }
+
+  // Pairing alone cannot detect a lost replay with no visible tool results.
+  // Every source replay occurrence must remain exactly once, unchanged, and in
+  // source order. Identity/provenance, not an equal-looking replacement, matters.
+  if (replayIndices.length === 0) return;
+  const expected = new Set(replayIndices);
+  const retained: number[] = [];
+  for (const message of projectedMessages) {
+    const index = sourceIndex(message);
+    if (index === undefined || !expected.has(index)) continue;
+    const source = sourceMessages[index]!;
+    const sourcePayload = (source as AgentMessage & Record<string, unknown>).providerPayload;
+    const projectedPayload = (message as AgentMessage & Record<string, unknown>).providerPayload;
+    if (projectedPayload !== sourcePayload || !isDeepStrictEqual(message, source)) {
+      throw new Error(`DCP produced invalid provider replay history: modified-provider-replay@${index}`);
+    }
+    retained.push(index);
+  }
+  if (retained.length !== replayIndices.length || retained.some((index, offset) => index !== replayIndices[offset])) {
+    throw new Error("DCP produced invalid provider replay history: missing-provider-replay, duplicate-provider-replay, or reordered replay occurrence");
+  }
 }

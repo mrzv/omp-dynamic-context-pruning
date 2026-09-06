@@ -1,9 +1,9 @@
+import { effectiveActiveBlocks } from "./active-blocks.ts";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
 import type { LogicalMessage } from "../messages/logical-messages.ts";
 import { replaceBlockIdsWithBlocked } from "../messages/metadata.ts";
 import type { CompressionBlock, RuntimeState } from "../state/types.ts";
-import { replayUnsafeBlockIds } from "./replay-protection.ts";
 
 function syntheticSummary(summary: string, timestamp: number, messageMode: boolean): UserMessage {
   return {
@@ -20,17 +20,10 @@ export function applyCompressedContext(
   state: RuntimeState,
   messageMode: boolean,
 ): AgentMessage[] {
-  const availableKeys = new Set(groups.flatMap((group) => group.key ? [group.key] : []));
-  const unsafeBlocks = replayUnsafeBlockIds(state, groups);
   const blocksByAnchor = new Map<string, CompressionBlock[]>();
   const coveredKeys = new Set<string>();
 
-  for (const blockId of [...state.activeBlockIds].sort((left, right) => left - right)) {
-    const block = state.blocks.get(blockId);
-    if (!block?.active || !availableKeys.has(block.anchorKey)) continue;
-    // A saved block may predate replay protection. Ignore the whole block rather
-    // than replacing the replay boundary or applying only part of its coverage.
-    if (unsafeBlocks.has(blockId)) continue;
+  for (const block of effectiveActiveBlocks(state, groups).values()) {
     const anchored = blocksByAnchor.get(block.anchorKey);
     if (anchored) anchored.push(block);
     else blocksByAnchor.set(block.anchorKey, [block]);

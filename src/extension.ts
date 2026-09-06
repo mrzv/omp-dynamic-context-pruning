@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { effectiveActiveBlocks } from "./compress/active-blocks.ts";
 import { buildCompressionBlocks } from "./compress/apply.ts";
 import { prepareMessageCompression } from "./compress/message.ts";
 import {
@@ -328,8 +329,6 @@ function findNudgeTargetIndex(
   reference: string,
   targetRole: "user" | "assistant",
 ): number {
-  // Replay text can retain stale tags. Never let such a tag target the opaque
-  // carrier; a missing safe target falls back to a separate nudge message.
   const taggedIndex = messages.findLastIndex((message) => (
     !hasOpaqueProviderReplay(message) && hasMessageReference(message, reference)
   ));
@@ -353,7 +352,9 @@ function appendNudge(
 ): void {
   if (controller.state.manualMode || controller.config.compress.permission === "deny") return;
   const lastGroup = groups.at(-1);
-  if (!lastGroup?.ref) return;
+  if (!lastGroup) return;
+  const replayTail = lastGroup.messages.some(hasOpaqueProviderReplay);
+  if (!lastGroup.ref && !replayTail) return;
   const usage = context.getContextUsage();
   const contextWindow = usage?.contextWindow ?? context.model?.contextWindow ?? undefined;
   const tokens = usage?.tokens ?? countMessagesTokens(messages);
@@ -361,7 +362,7 @@ function appendNudge(
   const model = context.model?.id;
   const minimum = modelThreshold(controller.config, "min", provider, model, contextWindow);
   const summaryBuffer = controller.config.compress.summaryBuffer
-    ? [...controller.state.activeBlockIds].reduce((total, blockId) => total + (controller.state.blocks.get(blockId)?.summaryTokens ?? 0), 0)
+    ? [...effectiveActiveBlocks(controller.state, groups).values()].reduce((total, block) => total + block.summaryTokens, 0)
     : 0;
   const maximum = modelThreshold(controller.config, "max", provider, model, contextWindow) + summaryBuffer;
   const nextAnchors = {
@@ -390,20 +391,20 @@ function appendNudge(
       ) ?? lastGroup;
     targetRole = anchorGroup.kind === "user" ? "user" : anchorGroup.kind === "assistant" ? "assistant" : undefined;
     targetRef = anchorGroup.ref;
-    if (addAnchor && !controller.state.nudges.contextLimitAnchors.has(lastGroup.ref)) {
+    if (addAnchor && lastGroup.ref && !controller.state.nudges.contextLimitAnchors.has(lastGroup.ref)) {
       nextAnchors.contextLimit.push(lastGroup.ref);
       changed = true;
     }
-  } else if (lastGroup.kind === "user") {
+  } else if (lastGroup.kind === "user" || replayTail) {
     const soft = controller.config.compress.nudgeForce === "soft";
     const anchorGroup = soft
       ? groups.findLast((group) => group.kind === "assistant" && group.ref !== undefined)
       : lastGroup;
-    if (anchorGroup?.ref) {
+    if (anchorGroup?.ref || replayTail) {
       nudge = controller.prompts.get("turn-nudge");
       targetRole = soft ? "assistant" : "user";
-      targetRef = anchorGroup.ref;
-      if (!controller.state.nudges.turnAnchors.has(anchorGroup.ref)) {
+      targetRef = anchorGroup?.ref;
+      if (anchorGroup?.ref && !controller.state.nudges.turnAnchors.has(anchorGroup.ref)) {
         nextAnchors.turn.push(anchorGroup.ref);
         changed = true;
       }
@@ -421,7 +422,7 @@ function appendNudge(
       targetRef = lastGroup.ref;
       const addAnchor = nextAnchors.iteration.length === 0
         || controller.requestSequence % controller.config.compress.nudgeFrequency === 0;
-      if (addAnchor && !controller.state.nudges.iterationAnchors.has(lastGroup.ref)) {
+      if (addAnchor && lastGroup.ref && !controller.state.nudges.iterationAnchors.has(lastGroup.ref)) {
         nextAnchors.iteration.push(lastGroup.ref);
         changed = true;
       }
@@ -1060,7 +1061,7 @@ export function registerDynamicContextPruning(
       associationReset: association.stats.reset,
       toolCacheHits: toolCache.hits,
       toolCacheMisses: toolCache.misses,
-      activeBlocks: controller.state.activeBlockIds.size,
+      activeBlocks: effectiveActiveBlocks(controller.state, projectionGroups).size,
       prunedTools: controller.state.prunedTools.size,
       omittedIncompleteToolGroups: projectionRepair.omitted.length,
     };
