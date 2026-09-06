@@ -1,5 +1,6 @@
 import { createMessageReferenceState } from "../messages/identity.ts";
 import type { CompressionBlock, PersistedMutation, RuntimeState } from "./types.ts";
+import { collectReplayUnsafeBlockIds } from "../compress/replay-protection.ts";
 
 export function createRuntimeState(manualMode = false): RuntimeState {
   return {
@@ -45,6 +46,27 @@ function coveredKeys(state: RuntimeState, activeBlockIds: ReadonlySet<number>): 
   return keys;
 }
 
+// A parent stores only its newly compressed tokens; consumed children account
+// for the rest. Quarantining a parent restores the entire represented subtree,
+// unlike ordinary decompression, which can reactivate the children.
+function representedCompressionTokens(state: RuntimeState): number {
+  const seen = new Set<number>();
+  const pending = [...state.activeBlockIds];
+  let tokens = 0;
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (id === undefined || seen.has(id)) continue;
+    seen.add(id);
+    const block = state.blocks.get(id);
+    if (!block || block.invalidatedByReplay) continue;
+    // A consumed child marked user-decompressed is still represented by its
+    // active parent until that parent is restored. Include its contribution.
+    tokens += block.compressedTokens;
+    pending.push(...block.consumedBlockIds);
+  }
+  return tokens;
+}
+
 export function applyMutation(state: RuntimeState, mutation: PersistedMutation): void {
   switch (mutation.kind) {
     case "references-assigned": {
@@ -77,9 +99,12 @@ export function applyMutation(state: RuntimeState, mutation: PersistedMutation):
         if (
           !block.active
           || block.deactivatedByUser
+          || block.invalidatedByReplay
           || incomingIds.has(block.blockId)
           || state.blocks.has(block.blockId)
-          || block.consumedBlockIds.some((blockId) => !state.blocks.has(blockId))
+          || block.consumedBlockIds.some((blockId) => (
+            !state.blocks.has(blockId) || state.blocks.get(blockId)?.invalidatedByReplay
+          ))
         ) return;
         incomingIds.add(block.blockId);
       }
@@ -97,7 +122,9 @@ export function applyMutation(state: RuntimeState, mutation: PersistedMutation):
     case "blocks-activation": {
       const changedIds = new Set<number>();
       for (const change of mutation.changes) {
-        if (changedIds.has(change.blockId) || !state.blocks.has(change.blockId)) return;
+        const block = state.blocks.get(change.blockId);
+        if (changedIds.has(change.blockId) || !block) return;
+        if (block.invalidatedByReplay && (change.active || change.deactivatedByUser)) return;
         changedIds.add(change.blockId);
       }
       const beforeActive = new Set(state.activeBlockIds);
@@ -126,6 +153,24 @@ export function applyMutation(state: RuntimeState, mutation: PersistedMutation):
       }
       state.activeBlockIds = afterActive;
       state.stats.totalPruneTokens = Math.max(0, state.stats.totalPruneTokens + tokenDelta);
+      break;
+    }
+    case "replay-blocks-invalidated": {
+      if (mutation.blockIds.some((id) => !state.blocks.has(id))) return;
+      // Include consuming ancestors, even in an older or partially repaired
+      // journal. Otherwise recompressing a parent could restore unsafe coverage.
+      const invalidIds = collectReplayUnsafeBlockIds(state, mutation.blockIds);
+      const beforeTokens = representedCompressionTokens(state);
+      for (const id of invalidIds) {
+        const block = state.blocks.get(id);
+        if (!block) continue;
+        block.active = false;
+        block.deactivatedByUser = false;
+        block.invalidatedByReplay = true;
+        state.activeBlockIds.delete(id);
+      }
+      const restoredTokens = beforeTokens - representedCompressionTokens(state);
+      state.stats.totalPruneTokens = Math.max(0, state.stats.totalPruneTokens - restoredTokens);
       break;
     }
     case "manual-mode":

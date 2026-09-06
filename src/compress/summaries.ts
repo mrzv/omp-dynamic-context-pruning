@@ -79,9 +79,9 @@ export function expandNestedSummaries(
   return { summary: expanded, consumedBlockIds: [...consumed] };
 }
 
-function isAlreadyCompressed(state: RuntimeState, key: string): boolean {
-  for (const blockId of state.activeBlockIds) {
-    if (state.blocks.get(blockId)?.memberKeys.includes(key)) return true;
+function isAlreadyCompressed(context: CompressionSearchContext, key: string): boolean {
+  for (const block of context.activeBlocks.values()) {
+    if (block.memberKeys.includes(key)) return true;
   }
   return false;
 }
@@ -89,11 +89,11 @@ function isAlreadyCompressed(state: RuntimeState, key: string): boolean {
 function appendProtectedUsers(
   summary: string,
   selection: CompressionSelection,
-  state: RuntimeState,
+  context: CompressionSearchContext,
 ): string {
   const texts: string[] = [];
   for (const group of selection.groups) {
-    if (!group.key || isAlreadyCompressed(state, group.key) || group.kind !== "user") continue;
+    if (!group.key || isAlreadyCompressed(context, group.key) || group.kind !== "user") continue;
     const message = group.messages[0];
     if (!message) continue;
     const text = messageText(message).trim();
@@ -115,11 +115,11 @@ export function extractProtectedPromptInfo(text: string): string[] {
 function appendProtectedTags(
   summary: string,
   selection: CompressionSelection,
-  state: RuntimeState,
+  context: CompressionSearchContext,
 ): string {
   const texts: string[] = [];
   for (const group of selection.groups) {
-    if (!group.key || isAlreadyCompressed(state, group.key) || group.kind !== "user") continue;
+    if (!group.key || isAlreadyCompressed(context, group.key) || group.kind !== "user") continue;
     for (const message of group.messages) texts.push(...extractProtectedPromptInfo(messageText(message)));
   }
   if (texts.length === 0) return summary;
@@ -129,12 +129,12 @@ function appendProtectedTags(
 function appendProtectedTools(
   summary: string,
   selection: CompressionSelection,
-  state: RuntimeState,
+  context: CompressionSearchContext,
   options: CompressionProtectionOptions,
 ): string {
   const outputs: string[] = [];
   for (const group of selection.groups) {
-    if (!group.key || isAlreadyCompressed(state, group.key)) continue;
+    if (!group.key || isAlreadyCompressed(context, group.key)) continue;
     const resultByCallId = new Map(group.toolResults.map((result) => [result.toolCallId, result]));
     for (const call of group.toolCalls) {
       const protectedTool = isToolNameProtected(call.name, options.protectedTools)
@@ -161,9 +161,9 @@ export function prepareSummary(
 ): { summary: string; consumedBlockIds: number[] } {
   const nested = expandNestedSummaries(rawSummary, selection, searchContext.activeBlocks);
   let summary = nested.summary;
-  if (options.protectUserMessages) summary = appendProtectedUsers(summary, selection, state);
-  if (options.protectTags) summary = appendProtectedTags(summary, selection, state);
-  summary = appendProtectedTools(summary, selection, state, options);
+  if (options.protectUserMessages) summary = appendProtectedUsers(summary, selection, searchContext);
+  if (options.protectTags) summary = appendProtectedTags(summary, selection, searchContext);
+  summary = appendProtectedTools(summary, selection, searchContext, options);
   return { summary, consumedBlockIds: nested.consumedBlockIds };
 }
 

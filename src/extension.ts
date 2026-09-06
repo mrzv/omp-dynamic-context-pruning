@@ -12,6 +12,7 @@ import { buildPriorityMap, priorityTags } from "./compress/priority.ts";
 import { prepareRangeCompression } from "./compress/range.ts";
 import { buildCompressionSearchContext } from "./compress/search.ts";
 import { applyCompressedContext } from "./compress/transform.ts";
+import { planReplayBlockInvalidation } from "./compress/replay-protection.ts";
 import type {
   CompressMessageArgs,
   CompressRangeArgs,
@@ -31,6 +32,7 @@ import {
 import {
   buildLogicalMessages,
   cloneLogicalMessagesForProjection,
+  hasOpaqueProviderReplay,
   omitIncompleteToolGroupsForProjection,
   type LogicalMessage,
 } from "./messages/logical-messages.ts";
@@ -182,6 +184,10 @@ function synchronizeReferences(
     });
   }
   for (const group of groups) {
+    if (group.protected || group.messages.some(hasOpaqueProviderReplay)) {
+      delete group.ref;
+      continue;
+    }
     if (group.key) {
       const reference = next.byKey.get(group.key);
       if (reference) group.ref = reference;
@@ -322,7 +328,11 @@ function findNudgeTargetIndex(
   reference: string,
   targetRole: "user" | "assistant",
 ): number {
-  const taggedIndex = messages.findLastIndex((message) => hasMessageReference(message, reference));
+  // Replay text can retain stale tags. Never let such a tag target the opaque
+  // carrier; a missing safe target falls back to a separate nudge message.
+  const taggedIndex = messages.findLastIndex((message) => (
+    !hasOpaqueProviderReplay(message) && hasMessageReference(message, reference)
+  ));
   const tagged = messages[taggedIndex];
   if (tagged?.role === targetRole) return taggedIndex;
   if (targetRole !== "assistant" || tagged?.role !== "toolResult") return -1;
@@ -440,7 +450,7 @@ function appendNudge(
   if (nudge && targetRole && targetRef) {
     const targetIndex = findNudgeTargetIndex(messages, targetRef, targetRole);
     const target = messages[targetIndex];
-    if (target?.role === "user") {
+    if (target?.role === "user" && !hasOpaqueProviderReplay(target)) {
       const updated = {
         ...target,
         content: typeof target.content === "string"
@@ -961,6 +971,20 @@ export function registerDynamicContextPruning(
 
     phaseStartedAt = performance.now();
     const groups = buildLogicalMessages(messages, association.entryIds);
+    const invalidatedBlockIds = planReplayBlockInvalidation(controller.state, groups);
+    if (invalidatedBlockIds.length > 0) {
+      // Reconcile before selection, nesting, accounting, and nudge budgeting,
+      // not just while rendering the projection. Persist for resume/branching.
+      persist(pi, controller.state, {
+        version: 1,
+        at: Date.now(),
+        kind: "replay-blocks-invalidated",
+        blockIds: invalidatedBlockIds,
+      });
+      pi.logger.warn("DCP invalidated compression blocks covering provider replay", {
+        blockIds: invalidatedBlockIds,
+      });
+    }
     synchronizeReferences(pi, controller.state, groups);
     phases.grouping = performance.now() - phaseStartedAt;
 

@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { assistantToolCalls, getProjectionSource } from "./logical-messages.ts";
+import { assistantToolCalls, getProjectionSource, hasOpaqueProviderReplay } from "./logical-messages.ts";
 
 export type PairingIssueKind = "duplicate-call" | "duplicate-result" | "orphan-result" | "missing-result";
 
@@ -71,7 +71,7 @@ export function assertValidToolPairing(
 }
 
 function opaqueReplayPayload(message: AgentMessage | undefined): object | undefined {
-  if (message?.role !== "user") return undefined;
+  if (!message || !hasOpaqueProviderReplay(message)) return undefined;
   const payload = (message as AgentMessage & Record<string, unknown>).providerPayload;
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)
     ? payload
@@ -103,7 +103,13 @@ export function assertValidToolPairingProjection(
   projectedMessages: readonly AgentMessage[],
 ): void {
   const projectedIssues = findToolPairingIssues(projectedMessages);
-  if (projectedIssues.length === 0) return;
+  // An opaque payload can contain the entire history, even when no visible
+  // tool results remain. The pairing fast path must not bypass its preservation.
+  const replayIndices = new Set<number>();
+  sourceMessages.forEach((message, index) => {
+    if (hasOpaqueProviderReplay(message)) replayIndices.add(index);
+  });
+  if (projectedIssues.length === 0 && replayIndices.size === 0) return;
 
   const sourceBoundaries = replayBoundaries(sourceMessages);
   const projectedBoundaries = replayBoundaries(projectedMessages);
@@ -129,6 +135,25 @@ export function assertValidToolPairingProjection(
     return undefined;
   };
 
+  const retainedReplays = new Set<number>();
+  const replayIssues: string[] = [];
+  for (const message of projectedMessages) {
+    const index = sourceIndex(message);
+    if (index === undefined || !replayIndices.has(index)) continue;
+    const original = sourceMessages[index] as AgentMessage & Record<string, unknown>;
+    const projected = message as AgentMessage & Record<string, unknown>;
+    if (projected.role !== original.role || projected.providerPayload !== original.providerPayload) {
+      replayIssues.push(`modified-provider-replay@${index}`);
+    } else if (retainedReplays.has(index)) {
+      replayIssues.push(`duplicate-provider-replay@${index}`);
+    } else {
+      retainedReplays.add(index);
+    }
+  }
+  for (const index of replayIndices) {
+    if (!retainedReplays.has(index)) replayIssues.push(`missing-provider-replay@${index}`);
+  }
+
   const issues = projectedIssues.filter((issue) => {
     if (issue.kind !== "orphan-result") return true;
     const originalIndex = sourceIndex(projectedMessages[issue.messageIndex]);
@@ -146,9 +171,10 @@ export function assertValidToolPairingProjection(
     allowedOrphans.delete(originalIndex);
     return false;
   });
-  if (issues.length === 0) return;
-  const description = issues
-    .map((issue) => `${issue.kind}:${issue.toolCallId}@${issue.messageIndex}`)
-    .join(", ");
+  if (issues.length === 0 && replayIssues.length === 0) return;
+  const description = [
+    ...issues.map((issue) => `${issue.kind}:${issue.toolCallId}@${issue.messageIndex}`),
+    ...replayIssues,
+  ].join(", ");
   throw new Error(`DCP produced invalid tool history: ${description}`);
 }

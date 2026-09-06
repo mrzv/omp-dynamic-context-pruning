@@ -1,6 +1,7 @@
 import { parseMessageReference } from "../messages/identity.ts";
 import type { LogicalMessage } from "../messages/logical-messages.ts";
 import type { CompressionBlock, RuntimeState } from "../state/types.ts";
+import { replayUnsafeBlockIds } from "./replay-protection.ts";
 import { countMessagesTokens } from "../token-utils.ts";
 import type {
   BoundaryReference,
@@ -34,8 +35,9 @@ export function buildCompressionSearchContext(
     indexByKey.set(group.key, index);
   }
   const activeBlocks = new Map<number, CompressionBlock>();
+  const unsafeBlocks = replayUnsafeBlockIds(state, groups);
   for (const [blockId, block] of state.blocks) {
-    if (block.active) activeBlocks.set(blockId, block);
+    if (block.active && !unsafeBlocks.has(blockId)) activeBlocks.set(blockId, block);
   }
   return { groups, groupByKey, indexByKey, activeBlocks };
 }

@@ -29,9 +29,9 @@ export function validateMessageArgs(args: CompressMessageArgs): void {
   }
 }
 
-function isCovered(state: RuntimeState, key: string): boolean {
-  for (const blockId of state.activeBlockIds) {
-    if (state.blocks.get(blockId)?.memberKeys.includes(key)) return true;
+function isCovered(context: CompressionSearchContext, key: string): boolean {
+  for (const block of context.activeBlocks.values()) {
+    if (block.memberKeys.includes(key)) return true;
   }
   return false;
 }
@@ -71,7 +71,7 @@ export function prepareMessageCompression(
       const selection = resolveSelection(searchContext, boundary, boundary);
       const group = selection.groups[0];
       if (!group?.key || group.ref !== messageId) throw new Error("message is not compressible");
-      if (isCovered(state, group.key)) throw new Error("message is already part of an active compression");
+      if (isCovered(searchContext, group.key)) throw new Error("message is already part of an active compression");
       if (protection.protectUserMessages && group.kind === "user") {
         throw new Error("protected user messages cannot be compressed in message mode");
       }

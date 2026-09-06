@@ -39,7 +39,11 @@ export function assistantToolCalls(message: AgentMessage): ToolCall[] {
 /** Native replay payloads are opaque and must not be rewritten or compressed. */
 export function hasOpaqueProviderReplay(message: AgentMessage): boolean {
   const value = message as AgentMessage & Record<string, unknown>;
-  return value.role === "user" && value.providerPayload !== undefined;
+  // Context hooks run before OMP converts native compactionSummary messages
+  // into provider-facing user messages. Developer replay carriers are also
+  // supported by OMP's Responses converter.
+  return (value.role === "user" || value.role === "developer" || value.role === "compactionSummary")
+    && value.providerPayload !== undefined;
 }
 
 function messageKind(message: AgentMessage): LogicalMessageKind {
