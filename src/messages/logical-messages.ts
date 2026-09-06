@@ -36,6 +36,12 @@ export function assistantToolCalls(message: AgentMessage): ToolCall[] {
   );
 }
 
+/** Native replay payloads are opaque and must not be rewritten or compressed. */
+export function hasOpaqueProviderReplay(message: AgentMessage): boolean {
+  const value = message as AgentMessage & Record<string, unknown>;
+  return value.role === "user" && value.providerPayload !== undefined;
+}
+
 function messageKind(message: AgentMessage): LogicalMessageKind {
   if (message.role === "user") return "user";
   if (message.role === "assistant") return "assistant";
@@ -177,7 +183,10 @@ export function buildLogicalMessages(
       groups.push({
         ...(entryId ? { key: entryId } : {}),
         kind,
-        protected: kind === "protected" || kind === "orphan-tool-result" || !entryId,
+        protected: kind === "protected"
+          || kind === "orphan-tool-result"
+          || hasOpaqueProviderReplay(message)
+          || !entryId,
         startIndex: index,
         endIndex: index,
         entryIds: [entryId],

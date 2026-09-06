@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import type { LogicalMessage } from "./logical-messages.ts";
+import { hasOpaqueProviderReplay, type LogicalMessage } from "./logical-messages.ts";
 
 const DCP_TAG_NAME = String.raw`dcp(?:[-_:][A-Za-z0-9_.:-]+)?`;
 const DCP_PAIRED_TAG = new RegExp(
@@ -39,11 +39,6 @@ function stripContent(content: unknown): boolean {
 
 function invalidateNativeReplay(value: Record<string, unknown>): void {
   delete value.providerPayload;
-}
-
-function hasOpaqueProviderReplay(message: AgentMessage): boolean {
-  const value = message as AgentMessage & Record<string, unknown>;
-  return value.role === "user" && value.providerPayload !== undefined;
 }
 
 export function stripDcpMetadata(messages: readonly AgentMessage[]): void {
