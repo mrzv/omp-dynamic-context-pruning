@@ -16,6 +16,19 @@ export interface LogicalMessage {
   toolResults: ToolResultMessage[];
 }
 
+interface ProjectionSource {
+  readonly message: AgentMessage;
+  readonly index: number;
+}
+
+// Keep occurrence identity outside message objects so it never reaches the provider.
+// The index distinguishes even repeated references to the same source object.
+const projectionSources = new WeakMap<AgentMessage, ProjectionSource>();
+
+export function getProjectionSource(message: AgentMessage): ProjectionSource | undefined {
+  return projectionSources.get(message);
+}
+
 export function assistantToolCalls(message: AgentMessage): ToolCall[] {
   if (message.role !== "assistant") return [];
   return (message as AssistantMessage).content.filter(
@@ -75,7 +88,11 @@ export function cloneLogicalMessagesForProjection(
   groups: readonly LogicalMessage[],
 ): LogicalMessage[] {
   return groups.map((group) => {
-    const messages = group.messages.map(cloneMessageForProjection);
+    const messages = group.messages.map((message, offset) => {
+      const cloned = cloneMessageForProjection(message);
+      projectionSources.set(cloned, { message, index: group.startIndex + offset });
+      return cloned;
+    });
     return {
       ...group,
       entryIds: [...group.entryIds],
