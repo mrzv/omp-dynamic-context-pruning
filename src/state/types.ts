@@ -29,6 +29,8 @@ export interface CompressionBlock {
   mode: CompressionMode;
   active: boolean;
   deactivatedByUser: boolean;
+  /** Permanently quarantined: this block would hide an opaque replay boundary. */
+  invalidatedByReplay?: true;
   topic: string;
   batchTopic?: string;
   startRef: string;
@@ -94,6 +96,7 @@ export type PersistedMutation =
   | (MutationBase & { kind: "tools-pruned"; records: PrunedToolRecord[] })
   | (MutationBase & { kind: "compression-created"; blocks: CompressionBlock[] })
   | (MutationBase & { kind: "blocks-activation"; changes: BlockActivationChange[] })
+  | (MutationBase & { kind: "replay-blocks-invalidated"; blockIds: number[] })
   | (MutationBase & { kind: "manual-mode"; enabled: boolean })
   | (MutationBase & {
       kind: "nudge-anchors";

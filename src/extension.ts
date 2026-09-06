@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { effectiveActiveBlocks } from "./compress/active-blocks.ts";
 import { buildCompressionBlocks } from "./compress/apply.ts";
 import { prepareMessageCompression } from "./compress/message.ts";
 import {
@@ -12,6 +13,7 @@ import { buildPriorityMap, priorityTags } from "./compress/priority.ts";
 import { prepareRangeCompression } from "./compress/range.ts";
 import { buildCompressionSearchContext } from "./compress/search.ts";
 import { applyCompressedContext } from "./compress/transform.ts";
+import { planReplayBlockInvalidation } from "./compress/replay-protection.ts";
 import type {
   CompressMessageArgs,
   CompressRangeArgs,
@@ -31,6 +33,7 @@ import {
 import {
   buildLogicalMessages,
   cloneLogicalMessagesForProjection,
+  hasOpaqueProviderReplay,
   omitIncompleteToolGroupsForProjection,
   type LogicalMessage,
 } from "./messages/logical-messages.ts";
@@ -44,7 +47,7 @@ import {
   type PendingPruneNotification,
 } from "./notifications.ts";
 import { injectMessageMetadata, stripDcpMetadata } from "./messages/metadata.ts";
-import { assertValidToolPairing } from "./messages/pairing.ts";
+import { assertValidToolPairingProjection } from "./messages/pairing.ts";
 import { MANUAL_MODE_PROMPT, PromptStore, SUBAGENT_PROMPT } from "./prompts/store.ts";
 import { appendMutation, restoreStateFromBranch } from "./state/persistence.ts";
 import { applyMutation } from "./state/runtime.ts";
@@ -182,6 +185,10 @@ function synchronizeReferences(
     });
   }
   for (const group of groups) {
+    if (group.protected || group.messages.some(hasOpaqueProviderReplay)) {
+      delete group.ref;
+      continue;
+    }
     if (group.key) {
       const reference = next.byKey.get(group.key);
       if (reference) group.ref = reference;
@@ -322,7 +329,9 @@ function findNudgeTargetIndex(
   reference: string,
   targetRole: "user" | "assistant",
 ): number {
-  const taggedIndex = messages.findLastIndex((message) => hasMessageReference(message, reference));
+  const taggedIndex = messages.findLastIndex((message) => (
+    !hasOpaqueProviderReplay(message) && hasMessageReference(message, reference)
+  ));
   const tagged = messages[taggedIndex];
   if (tagged?.role === targetRole) return taggedIndex;
   if (targetRole !== "assistant" || tagged?.role !== "toolResult") return -1;
@@ -343,7 +352,9 @@ function appendNudge(
 ): void {
   if (controller.state.manualMode || controller.config.compress.permission === "deny") return;
   const lastGroup = groups.at(-1);
-  if (!lastGroup?.ref) return;
+  if (!lastGroup) return;
+  const replayTail = lastGroup.messages.some(hasOpaqueProviderReplay);
+  if (!lastGroup.ref && !replayTail) return;
   const usage = context.getContextUsage();
   const contextWindow = usage?.contextWindow ?? context.model?.contextWindow ?? undefined;
   const tokens = usage?.tokens ?? countMessagesTokens(messages);
@@ -351,7 +362,7 @@ function appendNudge(
   const model = context.model?.id;
   const minimum = modelThreshold(controller.config, "min", provider, model, contextWindow);
   const summaryBuffer = controller.config.compress.summaryBuffer
-    ? [...controller.state.activeBlockIds].reduce((total, blockId) => total + (controller.state.blocks.get(blockId)?.summaryTokens ?? 0), 0)
+    ? [...effectiveActiveBlocks(controller.state, groups).values()].reduce((total, block) => total + block.summaryTokens, 0)
     : 0;
   const maximum = modelThreshold(controller.config, "max", provider, model, contextWindow) + summaryBuffer;
   const nextAnchors = {
@@ -380,20 +391,20 @@ function appendNudge(
       ) ?? lastGroup;
     targetRole = anchorGroup.kind === "user" ? "user" : anchorGroup.kind === "assistant" ? "assistant" : undefined;
     targetRef = anchorGroup.ref;
-    if (addAnchor && !controller.state.nudges.contextLimitAnchors.has(lastGroup.ref)) {
+    if (addAnchor && lastGroup.ref && !controller.state.nudges.contextLimitAnchors.has(lastGroup.ref)) {
       nextAnchors.contextLimit.push(lastGroup.ref);
       changed = true;
     }
-  } else if (lastGroup.kind === "user") {
+  } else if (lastGroup.kind === "user" || replayTail) {
     const soft = controller.config.compress.nudgeForce === "soft";
     const anchorGroup = soft
       ? groups.findLast((group) => group.kind === "assistant" && group.ref !== undefined)
       : lastGroup;
-    if (anchorGroup?.ref) {
+    if (anchorGroup?.ref || replayTail) {
       nudge = controller.prompts.get("turn-nudge");
       targetRole = soft ? "assistant" : "user";
-      targetRef = anchorGroup.ref;
-      if (!controller.state.nudges.turnAnchors.has(anchorGroup.ref)) {
+      targetRef = anchorGroup?.ref;
+      if (anchorGroup?.ref && !controller.state.nudges.turnAnchors.has(anchorGroup.ref)) {
         nextAnchors.turn.push(anchorGroup.ref);
         changed = true;
       }
@@ -411,7 +422,7 @@ function appendNudge(
       targetRef = lastGroup.ref;
       const addAnchor = nextAnchors.iteration.length === 0
         || controller.requestSequence % controller.config.compress.nudgeFrequency === 0;
-      if (addAnchor && !controller.state.nudges.iterationAnchors.has(lastGroup.ref)) {
+      if (addAnchor && lastGroup.ref && !controller.state.nudges.iterationAnchors.has(lastGroup.ref)) {
         nextAnchors.iteration.push(lastGroup.ref);
         changed = true;
       }
@@ -440,7 +451,7 @@ function appendNudge(
   if (nudge && targetRole && targetRef) {
     const targetIndex = findNudgeTargetIndex(messages, targetRef, targetRole);
     const target = messages[targetIndex];
-    if (target?.role === "user") {
+    if (target?.role === "user" && !hasOpaqueProviderReplay(target)) {
       const updated = {
         ...target,
         content: typeof target.content === "string"
@@ -961,6 +972,20 @@ export function registerDynamicContextPruning(
 
     phaseStartedAt = performance.now();
     const groups = buildLogicalMessages(messages, association.entryIds);
+    const invalidatedBlockIds = planReplayBlockInvalidation(controller.state, groups);
+    if (invalidatedBlockIds.length > 0) {
+      // Reconcile before selection, nesting, accounting, and nudge budgeting,
+      // not just while rendering the projection. Persist for resume/branching.
+      persist(pi, controller.state, {
+        version: 1,
+        at: Date.now(),
+        kind: "replay-blocks-invalidated",
+        blockIds: invalidatedBlockIds,
+      });
+      pi.logger.warn("DCP invalidated compression blocks covering provider replay", {
+        blockIds: invalidatedBlockIds,
+      });
+    }
     synchronizeReferences(pi, controller.state, groups);
     phases.grouping = performance.now() - phaseStartedAt;
 
@@ -1019,7 +1044,7 @@ export function registerDynamicContextPruning(
 
     phaseStartedAt = performance.now();
     appendNudge(pi, controller, context, transformed, groups);
-    assertValidToolPairing(transformed);
+    assertValidToolPairingProjection(messages, transformed);
     context.ui.setStatus(STATUS_KEY, compactStatusText(controller.state));
     phases.finalization = performance.now() - phaseStartedAt;
 
@@ -1036,7 +1061,7 @@ export function registerDynamicContextPruning(
       associationReset: association.stats.reset,
       toolCacheHits: toolCache.hits,
       toolCacheMisses: toolCache.misses,
-      activeBlocks: controller.state.activeBlockIds.size,
+      activeBlocks: effectiveActiveBlocks(controller.state, projectionGroups).size,
       prunedTools: controller.state.prunedTools.size,
       omittedIncompleteToolGroups: projectionRepair.omitted.length,
     };

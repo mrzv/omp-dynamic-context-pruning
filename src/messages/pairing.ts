@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { assistantToolCalls } from "./logical-messages.ts";
+import { isDeepStrictEqual } from "node:util";
+import { assistantToolCalls, getProjectionSource, hasOpaqueProviderReplay } from "./logical-messages.ts";
 
 export type PairingIssueKind = "duplicate-call" | "duplicate-result" | "orphan-result" | "missing-result";
 
@@ -68,4 +69,112 @@ export function assertValidToolPairing(
     .map((issue) => `${issue.kind}:${issue.toolCallId}@${issue.messageIndex}`)
     .join(", ");
   throw new Error(`DCP produced invalid tool history: ${description}`);
+}
+
+function opaqueReplayPayload(message: AgentMessage | undefined): object | undefined {
+  if (!message || !hasOpaqueProviderReplay(message)) return undefined;
+  const payload = (message as AgentMessage & Record<string, unknown>).providerPayload;
+  return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ? payload
+    : undefined;
+}
+
+/** Associate only the contiguous result run immediately following an opaque replay. */
+function replayBoundaries(messages: readonly AgentMessage[]): Map<number, number> {
+  const boundaries = new Map<number, number>();
+  let boundary: number | undefined;
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (message?.role === "toolResult") {
+      if (boundary !== undefined) boundaries.set(index, boundary);
+    } else {
+      boundary = opaqueReplayPayload(message) !== undefined ? index : undefined;
+    }
+  }
+  return boundaries;
+}
+
+/**
+ * Accept only source orphan occurrences at an opaque provider replay boundary.
+ * Both that occurrence and its unchanged replay boundary must survive projection.
+ * Clones use out-of-band provenance, never tool IDs, timestamps, or content equality.
+ */
+export function assertValidToolPairingProjection(
+  sourceMessages: readonly AgentMessage[],
+  projectedMessages: readonly AgentMessage[],
+): void {
+  const projectedIssues = findToolPairingIssues(projectedMessages);
+  const replayIndices = sourceMessages.flatMap((message, index) => (
+    hasOpaqueProviderReplay(message) ? [index] : []
+  ));
+  if (projectedIssues.length === 0 && replayIndices.length === 0) return;
+
+  const sourceBoundaries = replayBoundaries(sourceMessages);
+  const projectedBoundaries = replayBoundaries(projectedMessages);
+  const allowedOrphans = new Map<number, PairingIssue>();
+  for (const issue of findToolPairingIssues(sourceMessages)) {
+    if (issue.kind === "orphan-result" && sourceBoundaries.has(issue.messageIndex)) {
+      allowedOrphans.set(issue.messageIndex, issue);
+    }
+  }
+
+  const sourceIndices = new Map<AgentMessage, number>();
+  sourceMessages.forEach((message, index) => {
+    sourceIndices.set(message, sourceIndices.has(message) ? -1 : index);
+  });
+  const sourceIndex = (message: AgentMessage | undefined): number | undefined => {
+    if (!message) return undefined;
+    const direct = sourceIndices.get(message);
+    // An untracked repeated reference is ambiguous; only a clone's index disambiguates it.
+    if (direct !== undefined) return direct >= 0 ? direct : undefined;
+    for (let source = getProjectionSource(message); source; source = getProjectionSource(source.message)) {
+      if (sourceMessages[source.index] === source.message) return source.index;
+    }
+    return undefined;
+  };
+
+  const issues = projectedIssues.filter((issue) => {
+    if (issue.kind !== "orphan-result") return true;
+    const originalIndex = sourceIndex(projectedMessages[issue.messageIndex]);
+    if (originalIndex === undefined) return true;
+    const allowed = allowedOrphans.get(originalIndex);
+    if (!allowed || allowed.toolCallId !== issue.toolCallId) return true;
+
+    const originalBoundary = sourceBoundaries.get(originalIndex);
+    const projectedBoundary = projectedBoundaries.get(issue.messageIndex);
+    if (originalBoundary === undefined || projectedBoundary === undefined) return true;
+    const replay = projectedMessages[projectedBoundary];
+    if (sourceIndex(replay) !== originalBoundary) return true;
+    if (opaqueReplayPayload(replay) !== opaqueReplayPayload(sourceMessages[originalBoundary])) return true;
+
+    allowedOrphans.delete(originalIndex);
+    return false;
+  });
+  if (issues.length > 0) {
+    const description = issues
+      .map((issue) => `${issue.kind}:${issue.toolCallId}@${issue.messageIndex}`)
+      .join(", ");
+    throw new Error(`DCP produced invalid tool history: ${description}`);
+  }
+
+  // Pairing alone cannot detect a lost replay with no visible tool results.
+  // Every source replay occurrence must remain exactly once, unchanged, and in
+  // source order. Identity/provenance, not an equal-looking replacement, matters.
+  if (replayIndices.length === 0) return;
+  const expected = new Set(replayIndices);
+  const retained: number[] = [];
+  for (const message of projectedMessages) {
+    const index = sourceIndex(message);
+    if (index === undefined || !expected.has(index)) continue;
+    const source = sourceMessages[index]!;
+    const sourcePayload = (source as AgentMessage & Record<string, unknown>).providerPayload;
+    const projectedPayload = (message as AgentMessage & Record<string, unknown>).providerPayload;
+    if (projectedPayload !== sourcePayload || !isDeepStrictEqual(message, source)) {
+      throw new Error(`DCP produced invalid provider replay history: modified-provider-replay@${index}`);
+    }
+    retained.push(index);
+  }
+  if (retained.length !== replayIndices.length || retained.some((index, offset) => index !== replayIndices[offset])) {
+    throw new Error("DCP produced invalid provider replay history: missing-provider-replay, duplicate-provider-replay, or reordered replay occurrence");
+  }
 }

@@ -82,6 +82,93 @@ describe("logical OMP messages", () => {
     expect(groups[1]?.toolResults.map((result) => result.toolCallId)).toEqual(["complete"]);
   });
 
+  test("omits trailing results detached from an incomplete tool group", () => {
+    const messages = [
+      assistantMessage([toolCall("complete", "read"), toolCall("detached", "read")], 1),
+      toolResult("complete", "done", 2),
+      { role: "developer", content: "Injected between tool results.", timestamp: 3 } as const,
+      toolResult("detached", "late", 4),
+    ];
+    const groups = cloneLogicalMessagesForProjection(buildLogicalMessages(messages));
+
+    const repaired = omitIncompleteToolGroupsForProjection(groups);
+    const projectedMessages = repaired.groups.flatMap((group) => group.messages);
+
+    expect(repaired.omitted).toEqual([{
+      startIndex: 0,
+      missingToolCallIds: ["detached"],
+    }]);
+    expect(projectedMessages.map((message) => message.role)).toEqual(["developer"]);
+    expect(findToolPairingIssues(projectedMessages)).toEqual([]);
+    expect(() => assertValidToolPairing(projectedMessages)).not.toThrow();
+  });
+
+  test("retains detached duplicate results for calls already resolved in an omitted group", () => {
+    const messages = [
+      assistantMessage([toolCall("complete", "read"), toolCall("missing", "read")], 1),
+      toolResult("complete", "done", 2),
+      { role: "developer", content: "Injected after the complete result.", timestamp: 3 } as const,
+      toolResult("complete", "duplicate", 4),
+    ];
+    const groups = cloneLogicalMessagesForProjection(buildLogicalMessages(messages));
+
+    const repaired = omitIncompleteToolGroupsForProjection(groups);
+    const projectedMessages = repaired.groups.flatMap((group) => group.messages);
+
+    expect(repaired.omitted).toEqual([{
+      startIndex: 0,
+      missingToolCallIds: ["missing"],
+    }]);
+    expect(projectedMessages).toEqual(messages.slice(2));
+    expect(findToolPairingIssues(projectedMessages)).toEqual([{
+      kind: "orphan-result",
+      toolCallId: "complete",
+      messageIndex: 1,
+    }]);
+  });
+
+  test("omits at most one detached result for each missing call", () => {
+    const messages = [
+      assistantMessage([toolCall("missing", "read")], 1),
+      { role: "developer", content: "Injected before detached results.", timestamp: 2 } as const,
+      toolResult("missing", "first", 3),
+      toolResult("missing", "duplicate", 4),
+    ];
+    const groups = cloneLogicalMessagesForProjection(buildLogicalMessages(messages));
+
+    const repaired = omitIncompleteToolGroupsForProjection(groups);
+    const projectedMessages = repaired.groups.flatMap((group) => group.messages);
+
+    expect(repaired.omitted).toEqual([{
+      startIndex: 0,
+      missingToolCallIds: ["missing"],
+    }]);
+    expect(projectedMessages).toEqual(messages.slice(1, 2).concat(messages.slice(3)));
+    expect(findToolPairingIssues(projectedMessages)).toEqual([{
+      kind: "orphan-result",
+      toolCallId: "missing",
+      messageIndex: 1,
+    }]);
+  });
+
+  test("retains orphan results that precede an omitted tool group", () => {
+    const messages = [
+      toolResult("future", "orphan", 1),
+      assistantMessage([toolCall("future", "read")], 2),
+    ];
+    const groups = cloneLogicalMessagesForProjection(buildLogicalMessages(messages));
+
+    const repaired = omitIncompleteToolGroupsForProjection(groups);
+    const projectedMessages = repaired.groups.flatMap((group) => group.messages);
+
+    expect(projectedMessages).toEqual(messages.slice(0, 1));
+    expect(findToolPairingIssues(projectedMessages)).toEqual([{
+      kind: "orphan-result",
+      toolCallId: "future",
+      messageIndex: 0,
+    }]);
+  });
+
   test("retains complete and intrinsically malformed tool groups for validation", () => {
     const complete = cloneLogicalMessagesForProjection(buildLogicalMessages([
       assistantMessage([toolCall("complete", "read")], 1),

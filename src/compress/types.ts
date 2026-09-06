@@ -46,6 +46,8 @@ export interface CompressionSelection {
   tokensByKey: Map<string, number>;
   toolCallIds: string[];
   requiredBlockIds: number[];
+  /** Request-local applicability snapshot; never serialize this selection. */
+  activeBlocks: ReadonlyMap<number, CompressionBlock>;
 }
 
 export interface ResolvedRangePlan {

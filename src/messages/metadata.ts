@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import type { LogicalMessage } from "./logical-messages.ts";
+import { hasOpaqueProviderReplay, type LogicalMessage } from "./logical-messages.ts";
 
 const DCP_TAG_NAME = String.raw`dcp(?:[-_:][A-Za-z0-9_.:-]+)?`;
 const DCP_PAIRED_TAG = new RegExp(
@@ -44,6 +44,7 @@ function invalidateNativeReplay(value: Record<string, unknown>): void {
 export function stripDcpMetadata(messages: readonly AgentMessage[]): void {
   for (const message of messages) {
     const value = message as AgentMessage & Record<string, unknown>;
+    if (hasOpaqueProviderReplay(message)) continue;
     let changed = false;
     if (typeof value.content === "string") {
       const stripped = stripDcpMetadataFromText(value.content);
@@ -138,6 +139,7 @@ export function injectMessageMetadata(
   blockedKeys?: ReadonlySet<string>,
 ): void {
   for (const group of groups) {
+    if (group.messages.some(hasOpaqueProviderReplay)) continue;
     const blocked = !group.ref || (group.key ? blockedKeys?.has(group.key) === true : true);
     if (blocked && group.kind === "protected") continue;
     if (group.kind === "assistant" && group.protected && group.toolCalls.length > group.toolResults.length) {

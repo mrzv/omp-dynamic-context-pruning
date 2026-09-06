@@ -1,3 +1,4 @@
+import { effectiveActiveBlocks } from "./active-blocks.ts";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
 import type { LogicalMessage } from "../messages/logical-messages.ts";
@@ -19,13 +20,10 @@ export function applyCompressedContext(
   state: RuntimeState,
   messageMode: boolean,
 ): AgentMessage[] {
-  const availableKeys = new Set(groups.flatMap((group) => group.key ? [group.key] : []));
   const blocksByAnchor = new Map<string, CompressionBlock[]>();
   const coveredKeys = new Set<string>();
 
-  for (const blockId of [...state.activeBlockIds].sort((left, right) => left - right)) {
-    const block = state.blocks.get(blockId);
-    if (!block?.active || !availableKeys.has(block.anchorKey)) continue;
+  for (const block of effectiveActiveBlocks(state, groups).values()) {
     const anchored = blocksByAnchor.get(block.anchorKey);
     if (anchored) anchored.push(block);
     else blocksByAnchor.set(block.anchorKey, [block]);

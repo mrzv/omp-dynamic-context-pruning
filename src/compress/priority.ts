@@ -1,3 +1,4 @@
+import { compressionCoveredKeys, effectiveActiveBlocks } from "./active-blocks.ts";
 import type { LogicalMessage } from "../messages/logical-messages.ts";
 import type { MessagePriority } from "../messages/metadata.ts";
 import type { RuntimeState } from "../state/types.ts";
@@ -17,16 +18,6 @@ export function classifyMessagePriority(tokenCount: number): MessagePriority {
   return "low";
 }
 
-function coveredKeys(state: RuntimeState): Set<string> {
-  const keys = new Set<string>();
-  for (const blockId of state.activeBlockIds) {
-    const block = state.blocks.get(blockId);
-    if (!block?.active) continue;
-    for (const key of block.memberKeys) keys.add(key);
-  }
-  return keys;
-}
-
 export function buildPriorityMap(
   groups: readonly LogicalMessage[],
   state: RuntimeState,
@@ -34,7 +25,7 @@ export function buildPriorityMap(
   protectUserMessages: boolean,
 ): CompressionPriorityMap {
   if (!messageMode) return new Map();
-  const covered = coveredKeys(state);
+  const covered = compressionCoveredKeys(effectiveActiveBlocks(state, groups));
   const priorities: CompressionPriorityMap = new Map();
   for (const group of groups) {
     if (!group.key || !group.ref || group.protected || covered.has(group.key)) continue;

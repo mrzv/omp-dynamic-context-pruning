@@ -16,11 +16,34 @@ export interface LogicalMessage {
   toolResults: ToolResultMessage[];
 }
 
+interface ProjectionSource {
+  readonly message: AgentMessage;
+  readonly index: number;
+}
+
+// Keep occurrence identity outside message objects so it never reaches the provider.
+// The index distinguishes even repeated references to the same source object.
+const projectionSources = new WeakMap<AgentMessage, ProjectionSource>();
+
+export function getProjectionSource(message: AgentMessage): ProjectionSource | undefined {
+  return projectionSources.get(message);
+}
+
 export function assistantToolCalls(message: AgentMessage): ToolCall[] {
   if (message.role !== "assistant") return [];
   return (message as AssistantMessage).content.filter(
     (part): part is ToolCall => part.type === "toolCall",
   );
+}
+
+/** Native replay payloads are opaque and must not be rewritten or compressed. */
+export function hasOpaqueProviderReplay(message: AgentMessage): boolean {
+  const value = message as AgentMessage & Record<string, unknown>;
+  // Context hooks run before OMP converts native compactionSummary messages
+  // into provider-facing user messages. Developer replay carriers are also
+  // supported by OMP's Responses converter.
+  return (value.role === "user" || value.role === "developer" || value.role === "compactionSummary")
+    && value.providerPayload !== undefined;
 }
 
 function messageKind(message: AgentMessage): LogicalMessageKind {
@@ -75,7 +98,11 @@ export function cloneLogicalMessagesForProjection(
   groups: readonly LogicalMessage[],
 ): LogicalMessage[] {
   return groups.map((group) => {
-    const messages = group.messages.map(cloneMessageForProjection);
+    const messages = group.messages.map((message, offset) => {
+      const cloned = cloneMessageForProjection(message);
+      projectionSources.set(cloned, { message, index: group.startIndex + offset });
+      return cloned;
+    });
     return {
       ...group,
       entryIds: [...group.entryIds],
@@ -101,6 +128,7 @@ export function omitIncompleteToolGroupsForProjection(
   const retained: LogicalMessage[] = [];
   const omitted: OmittedIncompleteToolGroup[] = [];
   const callIdCounts = new Map<string, number>();
+  const omittedCallStartIndices = new Map<string, number>();
   for (const group of groups) {
     for (const call of group.toolCalls) {
       callIdCounts.set(call.id, (callIdCounts.get(call.id) ?? 0) + 1);
@@ -108,6 +136,16 @@ export function omitIncompleteToolGroupsForProjection(
   }
 
   for (const group of groups) {
+    if (group.kind === "orphan-tool-result") {
+      const result = group.toolResults[0];
+      const omittedStartIndex = result
+        ? omittedCallStartIndices.get(result.toolCallId)
+        : undefined;
+      if (result && omittedStartIndex !== undefined && omittedStartIndex < group.startIndex) {
+        omittedCallStartIndices.delete(result.toolCallId);
+        continue;
+      }
+    }
     if (group.kind !== "assistant" || group.toolCalls.length === 0) {
       retained.push(group);
       continue;
@@ -127,6 +165,7 @@ export function omitIncompleteToolGroupsForProjection(
     }
 
     omitted.push({ startIndex: group.startIndex, missingToolCallIds });
+    for (const id of missingToolCallIds) omittedCallStartIndices.set(id, group.startIndex);
   }
 
   return { groups: retained, omitted };
@@ -148,7 +187,10 @@ export function buildLogicalMessages(
       groups.push({
         ...(entryId ? { key: entryId } : {}),
         kind,
-        protected: kind === "protected" || kind === "orphan-tool-result" || !entryId,
+        protected: kind === "protected"
+          || kind === "orphan-tool-result"
+          || hasOpaqueProviderReplay(message)
+          || !entryId,
         startIndex: index,
         endIndex: index,
         entryIds: [entryId],

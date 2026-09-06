@@ -64,6 +64,7 @@ function isCompressionBlocks(value: unknown): boolean {
     && (item.mode === "range" || item.mode === "message")
     && item.active === true
     && item.deactivatedByUser === false
+    && item.invalidatedByReplay === undefined
     && typeof item.topic === "string"
     && (item.batchTopic === undefined || typeof item.batchTopic === "string")
     && typeof item.startRef === "string"
@@ -110,6 +111,7 @@ export function isPersistedMutation(value: unknown): value is PersistedMutation 
       return isStringArray(value.contextLimit)
         && isStringArray(value.turn)
         && isStringArray(value.iteration);
+    case "replay-blocks-invalidated":
     case "native-compaction-reset":
       return isPositiveIntegerArray(value.blockIds);
     default:

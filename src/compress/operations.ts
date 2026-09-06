@@ -31,14 +31,17 @@ function targetFromBlocks(blocks: CompressionBlock[]): CompressionTarget {
 export function resolveCompressionTarget(state: RuntimeState, blockId: number): CompressionTarget | undefined {
   const block = state.blocks.get(blockId);
   if (!block) return undefined;
+  if (block.invalidatedByReplay) {
+    throw new Error(`Compression ${blockId} was invalidated to preserve provider replay.`);
+  }
   if (block.mode !== "message") return targetFromBlocks([block]);
   return targetFromBlocks([...state.blocks.values()].filter((candidate) => (
-    candidate.mode === "message" && candidate.runId === block.runId
+    !candidate.invalidatedByReplay && candidate.mode === "message" && candidate.runId === block.runId
   )));
 }
 
 export function listCompressionTargets(state: RuntimeState, active: boolean): CompressionTarget[] {
-  const blocks = [...state.blocks.values()];
+  const blocks = [...state.blocks.values()].filter((block) => !block.invalidatedByReplay);
   const eligible = blocks.filter((block) => (
     active ? block.active : !block.active && block.deactivatedByUser
   ));
@@ -102,7 +105,7 @@ export function planDecompress(state: RuntimeState, blockId: number): BlockActiv
   const childIds = new Set(activeBlocks.flatMap((block) => block.consumedBlockIds));
   for (const childId of childIds) {
     const child = state.blocks.get(childId);
-    if (!child || child.deactivatedByUser) continue;
+    if (!child || child.deactivatedByUser || child.invalidatedByReplay) continue;
     const stillConsumed = [...remainingActive].some((activeId) => {
       const activeBlock = state.blocks.get(activeId);
       return activeBlock ? blockContains(state, activeBlock, childId) : false;
